@@ -107,7 +107,10 @@ impl WebSocketClient {
 
     /// Connect and subscribe to all channels
     async fn connect_and_subscribe(&self, token_ids: &[String]) -> Result<()> {
-        let url = &self.config.ws_url;
+        // Polymarket uses separate URLs for market vs user channels
+        // wss://ws-subscriptions-clob.polymarket.com/ws/market
+        // wss://ws-subscriptions-clob.polymarket.com/ws/user
+        let url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
         info!("Connecting to WebSocket: {}", url);
 
         // Connect with timeout
@@ -125,87 +128,48 @@ impl WebSocketClient {
 
         let (mut write, mut read) = ws_stream.split();
 
-        // Subscribe to market creation events (instant new market detection)
-        let market_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_market",
-                "type": "market_created"
-            }]
-        });
-
-        write
-            .send(Message::Text(market_subscribe.to_string()))
-            .await
-            .context("Failed to subscribe to market_created")?;
-
-        info!("Subscribed to market_created events");
-
-        // Subscribe to orderbook updates for specific tokens
+        // Subscribe to market channel with asset IDs
+        // Format: {"assets_ids": ["token_id_1", "token_id_2"], "type": "market"}
         if !token_ids.is_empty() {
-            let orderbook_subscribe = json!({
-                "type": "subscribe",
-                "subscriptions": [{
-                    "topic": "clob_market",
-                    "type": "agg_orderbook",
-                    "filters": token_ids
-                }]
+            let market_subscribe = json!({
+                "assets_ids": token_ids,
+                "type": "market"
             });
 
             write
-                .send(Message::Text(orderbook_subscribe.to_string()))
+                .send(Message::Text(market_subscribe.to_string()))
                 .await
-                .context("Failed to subscribe to orderbook")?;
+                .context("Failed to subscribe to market")?;
 
-            info!("Subscribed to orderbook for {} tokens", token_ids.len());
-
-            // Also subscribe to price changes for faster updates
-            let price_subscribe = json!({
-                "type": "subscribe",
-                "subscriptions": [{
-                    "topic": "clob_market",
-                    "type": "price_change",
-                    "filters": token_ids
-                }]
+            info!("Subscribed to market channel for {} tokens", token_ids.len());
+        } else {
+            // If no token IDs, still need to send something to keep connection
+            let market_subscribe = json!({
+                "assets_ids": [],
+                "type": "market"
             });
 
             write
-                .send(Message::Text(price_subscribe.to_string()))
+                .send(Message::Text(market_subscribe.to_string()))
                 .await
-                .context("Failed to subscribe to price_change")?;
+                .context("Failed to subscribe to market")?;
+
+            info!("Subscribed to market channel (no tokens yet)");
         }
 
-        // Subscribe to user fills (authenticated)
-        let user_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_user",
-                "type": "*",
-                "clob_auth": {
-                    "key": self.config.api_key,
-                    "secret": self.config.api_secret,
-                    "passphrase": self.config.api_passphrase
-                }
-            }]
-        });
+        info!("Subscribed to all channels");
 
-        write
-            .send(Message::Text(user_subscribe.to_string()))
-            .await
-            .context("Failed to subscribe to user fills")?;
-
-        info!("Subscribed to user fill notifications");
-
-        // Spawn ping task to keep connection alive
+        // Spawn ping task to keep connection alive (every 10 seconds as per docs)
         let ping_write = Arc::new(tokio::sync::Mutex::new(write));
         let ping_writer = ping_write.clone();
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(30));
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 interval.tick().await;
                 let mut w = ping_writer.lock().await;
-                if w.send(Message::Ping(vec![])).await.is_err() {
+                // Polymarket expects text "PING" not binary ping frames
+                if w.send(Message::Text("PING".to_string())).await.is_err() {
                     break;
                 }
             }
