@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc, TimeZone};
 use reqwest::Client;
 use rust_decimal::Decimal;
+use rust_decimal::prelude::FromPrimitive;
 use tracing::{debug, info, warn};
 
 use crate::config::Config;
@@ -118,6 +119,7 @@ impl MarketMonitor {
         let mut up_token_id = String::new();
         let mut down_token_id = String::new();
 
+        // First try tokens array
         for token in &market.tokens {
             match token.outcome.to_lowercase().as_str() {
                 "up" | "yes" => up_token_id = token.token_id.clone(),
@@ -126,12 +128,28 @@ impl MarketMonitor {
             }
         }
 
+        // If tokens array empty, parse from clobTokenIds and outcomes
         if up_token_id.is_empty() || down_token_id.is_empty() {
-            // Try parsing from clobTokenIds if tokens array is empty
-            if let Some(prices_str) = &market.outcome_prices {
-                // Parse outcome prices to determine which token is which
-                debug!("Parsing from outcome_prices: {}", prices_str);
+            if let (Some(token_ids_str), Some(outcomes_str)) = (&market.clob_token_ids, &market.outcomes) {
+                // Parse JSON strings
+                let token_ids: Vec<String> = serde_json::from_str(token_ids_str).unwrap_or_default();
+                let outcomes: Vec<String> = serde_json::from_str(outcomes_str).unwrap_or_default();
+
+                debug!("Parsing from clobTokenIds: {:?}, outcomes: {:?}", token_ids, outcomes);
+
+                for (i, outcome) in outcomes.iter().enumerate() {
+                    if i < token_ids.len() {
+                        match outcome.to_lowercase().as_str() {
+                            "up" => up_token_id = token_ids[i].clone(),
+                            "down" => down_token_id = token_ids[i].clone(),
+                            _ => {}
+                        }
+                    }
+                }
             }
+        }
+
+        if up_token_id.is_empty() || down_token_id.is_empty() {
             warn!("Could not find Up/Down token IDs for market: {}", event.slug);
             return Ok(None);
         }
@@ -151,8 +169,7 @@ impl MarketMonitor {
         // Get tick size
         let tick_size = market
             .tick_size
-            .as_ref()
-            .and_then(|t| t.parse().ok())
+            .map(|t| Decimal::from_f64_retain(t).unwrap_or(Decimal::from_str_exact("0.01").unwrap()))
             .unwrap_or(Decimal::from_str_exact("0.01").unwrap());
 
         let neg_risk = market.neg_risk.unwrap_or(false);

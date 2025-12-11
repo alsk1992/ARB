@@ -7,13 +7,18 @@ use serde::{Deserialize, Serialize};
 pub struct Market {
     pub condition_id: String,
     pub question: String,
+    #[serde(default)]
     pub tokens: Vec<Token>,
     pub outcome_prices: Option<String>, // JSON string like "[\"0.5\", \"0.5\"]"
+    pub outcomes: Option<String>,       // JSON string like "[\"Up\", \"Down\"]"
+    pub clob_token_ids: Option<String>, // JSON string like "[\"123...\", \"456...\"]"
     pub end_date_iso: Option<String>,
+    pub end_date: Option<String>,
     pub active: bool,
     pub closed: bool,
     pub neg_risk: Option<bool>,
-    pub tick_size: Option<String>,
+    #[serde(alias = "orderPriceMinTickSize")]
+    pub tick_size: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
