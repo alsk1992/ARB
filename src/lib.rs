@@ -10,6 +10,7 @@ pub mod auth;
 pub mod clob;
 pub mod config;
 pub mod datalog;
+pub mod hft_clob;
 pub mod market;
 pub mod ml_client;
 pub mod multi_strategy;

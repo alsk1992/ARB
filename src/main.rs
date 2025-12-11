@@ -3,6 +3,7 @@ mod auth;
 mod clob;
 mod config;
 mod datalog;
+mod hft_clob;
 mod market;
 mod ml_client;
 mod orderbook;
@@ -26,6 +27,7 @@ use crate::alerts::AlertClient;
 use crate::clob::ClobClient;
 use crate::config::Config;
 use crate::datalog::{DataLogger, MarketSnapshot, OrderLog, FillLog, SessionSummary};
+use crate::hft_clob::HftClobClient;
 use crate::market::MarketMonitor;
 use crate::ml_client::MlClient;
 use crate::orderbook::OrderbookManager;
@@ -85,10 +87,17 @@ async fn main() -> Result<()> {
     let clob = ClobClient::new(config.clone())?;
     let signer = OrderSigner::new(&config.private_key, &config.address)?;
 
-    // HFT MODE: Enable pre-signing (reduces execution latency by ~150ms)
+    // HFT MODE: Ultra-optimized HTTP/2 client (5-10ms latency)
+    info!("Initializing HFT HTTP/2 client...");
+    let hft_clob = HftClobClient::new(config.clone())?;
+
+    // HFT MODE: Pre-signing cache (eliminates 150ms signing latency)
     info!("Initializing HFT pre-sign cache...");
     let presign_cache = Arc::new(PreSignCache::new(OrderSigner::new(&config.private_key, &config.address)?));
+
+    // Build strategy with full HFT stack
     let strategy = LadderStrategy::new(config.clone(), clob, signer)
+        .with_hft_client(hft_clob)
         .with_presign(presign_cache.clone());
 
     let market_monitor = MarketMonitor::new(config.clone());

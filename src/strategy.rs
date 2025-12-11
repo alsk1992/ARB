@@ -6,6 +6,7 @@ use tracing::{debug, info, warn};
 
 use crate::clob::ClobClient;
 use crate::config::Config;
+use crate::hft_clob::HftClobClient;
 use crate::presign::PreSignCache;
 use crate::signer::OrderSigner;
 use crate::types::{BtcMarket, Order, Orderbook, Position, Side};
@@ -21,6 +22,7 @@ use crate::types::{BtcMarket, Order, Orderbook, Position, Side};
 pub struct LadderStrategy {
     config: Config,
     clob: ClobClient,
+    hft_clob: Option<HftClobClient>,
     signer: OrderSigner,
     presign_cache: Option<Arc<PreSignCache>>,
 }
@@ -30,14 +32,21 @@ impl LadderStrategy {
         Self {
             config,
             clob,
+            hft_clob: None,
             signer,
             presign_cache: None,
         }
     }
 
-    /// Enable pre-signing for HFT mode (reduces latency from ~200ms to ~5ms)
+    /// Enable pre-signing for HFT mode (reduces latency from ~200ms to ~20ms)
     pub fn with_presign(mut self, presign_cache: Arc<PreSignCache>) -> Self {
         self.presign_cache = Some(presign_cache);
+        self
+    }
+
+    /// Enable HFT HTTP/2 client (reduces latency from ~20ms to ~5-10ms)
+    pub fn with_hft_client(mut self, hft_clob: HftClobClient) -> Self {
+        self.hft_clob = Some(hft_clob);
         self
     }
 
@@ -507,10 +516,31 @@ impl LadderStrategy {
         };
 
         // Submit both orders simultaneously
-        let (up_result, down_result) = tokio::join!(
-            self.clob.post_order(&up_order),
-            self.clob.post_order(&down_order),
-        );
+        // HFT MODE: Use optimized HTTP/2 parallel submission if available
+        let submit_start = std::time::Instant::now();
+
+        let (up_result, down_result) = if let Some(hft) = &self.hft_clob {
+            // HFT path: HTTP/2 multiplexing for true parallel submission
+            match hft.post_orders_parallel(&up_order, &down_order).await {
+                Ok((r1, r2)) => (Ok(r1), Ok(r2)),
+                Err(e) => {
+                    // Fallback to standard client
+                    warn!("HFT client failed, falling back: {}", e);
+                    tokio::join!(
+                        self.clob.post_order(&up_order),
+                        self.clob.post_order(&down_order),
+                    )
+                }
+            }
+        } else {
+            // Standard path: Regular tokio::join (still parallel but slower)
+            tokio::join!(
+                self.clob.post_order(&up_order),
+                self.clob.post_order(&down_order),
+            )
+        };
+
+        let submit_latency = submit_start.elapsed();
 
         let mut up_ids = Vec::new();
         let mut down_ids = Vec::new();
@@ -533,10 +563,13 @@ impl LadderStrategy {
 
         if !up_ids.is_empty() && !down_ids.is_empty() {
             let profit = (dec!(1) - combined) * shares;
-            info!("🎯 Snipe successful! Potential profit: ${} | Total latency: {:?}", profit, total_elapsed);
+            info!(
+                "🎯 Snipe successful! Potential profit: ${} | Submit: {:?} | Total: {:?}",
+                profit, submit_latency, total_elapsed
+            );
             Ok(Some((up_ids, down_ids)))
         } else {
-            warn!("Snipe partially failed (latency: {:?})", total_elapsed);
+            warn!("Snipe partially failed (submit: {:?}, total: {:?})", submit_latency, total_elapsed);
             Ok(None)
         }
     }
