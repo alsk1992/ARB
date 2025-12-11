@@ -546,9 +546,13 @@ async fn handle_ws_message(
         return Ok(());
     }
 
-    // Handle orderbook updates
-    if let Some(asset_id) = msg.get("asset_id").and_then(|a| a.as_str()) {
-        if msg.get("bids").is_some() && msg.get("asks").is_some() {
+    // Handle orderbook updates (event_type: "book")
+    if let Some(event_type) = msg.get("event_type").and_then(|t| t.as_str()) {
+        if event_type == "book" {
+            let asset_id = msg.get("asset_id").and_then(|a| a.as_str()).unwrap_or("");
+            if asset_id.is_empty() {
+                return Ok(());
+            }
             let bids: Vec<(String, String)> = msg["bids"]
                 .as_array()
                 .map(|arr| {
