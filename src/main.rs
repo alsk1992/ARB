@@ -90,14 +90,7 @@ async fn main() -> Result<()> {
     info!("Pre-warming connections...");
     prewarm_connections(&config).await;
 
-    // Start global WebSocket for market_created events
-    let global_ws_rx = spawn_websocket_with_orderbook(
-        config.clone(),
-        vec![], // No token filters, just market_created
-        orderbook_manager.clone(),
-    );
-
-    // Main trading loop
+    // Main trading loop - no global WebSocket, we poll for markets
     run_trading_loop(
         config,
         strategy,
@@ -106,7 +99,6 @@ async fn main() -> Result<()> {
         orderbook_manager,
         alerts,
         data_logger,
-        global_ws_rx,
     ).await
 }
 
@@ -135,39 +127,13 @@ async fn run_trading_loop(
     orderbook_manager: Arc<OrderbookManager>,
     alerts: Arc<AlertClient>,
     data_logger: Arc<DataLogger>,
-    mut global_ws_rx: tokio::sync::mpsc::Receiver<WsEvent>,
 ) -> Result<()> {
     loop {
         info!("═══════════════════════════════════════");
         info!("Searching for active BTC 15-min market...");
 
-        // Wait for market (either from polling or WebSocket)
-        let market = tokio::select! {
-            // Check for market_created event
-            Some(event) = global_ws_rx.recv() => {
-                match event {
-                    WsEvent::MarketCreated { condition_id, asset_ids, tick_size } => {
-                        info!("Instant market detection via WebSocket!");
-                        // Convert to BtcMarket - would need to fetch full details
-                        // For now, fall through to polling
-                        None
-                    }
-                    _ => None
-                }
-            }
-            // Poll for market
-            market = market_monitor.wait_for_next_market() => {
-                Some(market)
-            }
-        };
-
-        let market = match market {
-            Some(m) => m,
-            None => {
-                // WebSocket event, need to poll for full details
-                market_monitor.wait_for_next_market().await
-            }
-        };
+        // Poll for market (REST API)
+        let market = market_monitor.wait_for_next_market().await;
 
         info!("Found market: {}", market.title);
         info!("  UP token:   {}", market.up_token_id);
