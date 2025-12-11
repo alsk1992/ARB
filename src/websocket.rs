@@ -515,6 +515,9 @@ async fn handle_ws_message(
 ) -> Result<()> {
     let msg: serde_json::Value = serde_json::from_str(text)?;
 
+    // DEBUG: Log first 500 chars of every message
+    debug!("WS msg: {}", &text[..text.len().min(500)]);
+
     // Handle subscription confirmations
     if let Some(msg_type) = msg.get("type").and_then(|t| t.as_str()) {
         match msg_type {
