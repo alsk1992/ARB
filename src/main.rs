@@ -7,6 +7,7 @@ mod market;
 mod ml_client;
 mod orderbook;
 mod position;
+mod presign;
 mod retry;
 mod signer;
 mod strategy;
@@ -28,6 +29,7 @@ use crate::market::MarketMonitor;
 use crate::ml_client::MlClient;
 use crate::orderbook::OrderbookManager;
 use crate::position::PositionManager;
+use crate::presign::PreSignCache;
 use crate::signer::OrderSigner;
 use crate::strategy::LadderStrategy;
 use crate::types::BtcMarket;
@@ -81,7 +83,13 @@ async fn main() -> Result<()> {
     // Initialize components
     let clob = ClobClient::new(config.clone())?;
     let signer = OrderSigner::new(&config.private_key, &config.address)?;
-    let strategy = LadderStrategy::new(config.clone(), clob, signer);
+
+    // HFT MODE: Enable pre-signing (reduces execution latency by ~150ms)
+    info!("Initializing HFT pre-sign cache...");
+    let presign_cache = Arc::new(PreSignCache::new(OrderSigner::new(&config.private_key, &config.address)?));
+    let strategy = LadderStrategy::new(config.clone(), clob, signer)
+        .with_presign(presign_cache.clone());
+
     let market_monitor = MarketMonitor::new(config.clone());
     let position_manager = Arc::new(Mutex::new(PositionManager::new()));
     let orderbook_manager = Arc::new(OrderbookManager::new());
@@ -99,6 +107,7 @@ async fn main() -> Result<()> {
         orderbook_manager,
         alerts,
         data_logger,
+        presign_cache,
     ).await
 }
 
@@ -127,6 +136,7 @@ async fn run_trading_loop(
     orderbook_manager: Arc<OrderbookManager>,
     alerts: Arc<AlertClient>,
     data_logger: Arc<DataLogger>,
+    presign_cache: Arc<PreSignCache>,
 ) -> Result<()> {
     loop {
         info!("═══════════════════════════════════════");
@@ -142,6 +152,15 @@ async fn run_trading_loop(
         info!("  Tick size:  {}", market.tick_size);
 
         alerts.market_found(&market.title, &market.end_time.to_string()).await;
+
+        // HFT MODE: Pre-sign orders for this market (takes ~2-3min, saves ~150ms per trade)
+        info!("⚡ Pre-signing orders for HFT mode...");
+        if let Err(e) = presign_cache.presign_market(&market).await {
+            warn!("Failed to pre-sign orders: {}", e);
+        } else {
+            let stats = presign_cache.stats();
+            info!("✅ Pre-signed {} orders ready for instant execution", stats.total_orders);
+        }
 
         // Start WebSocket for this market's orderbooks
         let market_ws_rx = spawn_websocket_with_orderbook(

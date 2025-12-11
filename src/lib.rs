@@ -15,6 +15,7 @@ pub mod ml_client;
 pub mod multi_strategy;
 pub mod orderbook;
 pub mod position;
+pub mod presign;
 pub mod retry;
 pub mod signer;
 pub mod strategies;

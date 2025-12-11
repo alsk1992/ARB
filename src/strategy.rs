@@ -1,10 +1,12 @@
 use anyhow::Result;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::clob::ClobClient;
 use crate::config::Config;
+use crate::presign::PreSignCache;
 use crate::signer::OrderSigner;
 use crate::types::{BtcMarket, Order, Orderbook, Position, Side};
 
@@ -20,11 +22,23 @@ pub struct LadderStrategy {
     config: Config,
     clob: ClobClient,
     signer: OrderSigner,
+    presign_cache: Option<Arc<PreSignCache>>,
 }
 
 impl LadderStrategy {
     pub fn new(config: Config, clob: ClobClient, signer: OrderSigner) -> Self {
-        Self { config, clob, signer }
+        Self {
+            config,
+            clob,
+            signer,
+            presign_cache: None,
+        }
+    }
+
+    /// Enable pre-signing for HFT mode (reduces latency from ~200ms to ~5ms)
+    pub fn with_presign(mut self, presign_cache: Arc<PreSignCache>) -> Self {
+        self.presign_cache = Some(presign_cache);
+        self
     }
 
     /// Calculate optimal ladder prices for both sides
@@ -386,12 +400,17 @@ impl LadderStrategy {
     /// we can place immediate orders at best ask to lock in profit instantly.
     ///
     /// This is the aggressive complement to the passive ladder strategy.
+    ///
+    /// HFT OPTIMIZATION: Uses pre-signed orders when available to reduce
+    /// execution latency from ~200ms (sign + submit) to ~5ms (submit only).
     pub async fn snipe_spread(
         &self,
         market: &BtcMarket,
         up_ask: Decimal,
         down_ask: Decimal,
     ) -> Result<Option<(Vec<String>, Vec<String>)>> {
+        let snipe_start = std::time::Instant::now();
+
         let combined = up_ask + down_ask;
         let spread_pct = (dec!(1) - combined) / combined * dec!(100);
 
@@ -421,24 +440,71 @@ impl LadderStrategy {
 
         info!("Sniping {} shares each side", shares);
 
-        // Create orders at best ask for immediate fill
-        let up_order = self.signer.create_order(
-            &market.up_token_id,
-            up_ask,
-            shares,
-            Side::Buy,
-            market.tick_size,
-            market.neg_risk,
-        ).await?;
+        // HFT MODE: Try to use pre-signed orders first (saves ~150ms per order)
+        let (up_order, down_order) = if let Some(cache) = &self.presign_cache {
+            let sign_start = std::time::Instant::now();
 
-        let down_order = self.signer.create_order(
-            &market.down_token_id,
-            down_ask,
-            shares,
-            Side::Buy,
-            market.tick_size,
-            market.neg_risk,
-        ).await?;
+            let up_presigned = cache.get_order(&market.up_token_id, up_ask, shares, Side::Buy);
+            let down_presigned = cache.get_order(&market.down_token_id, down_ask, shares, Side::Buy);
+
+            match (up_presigned, down_presigned) {
+                (Some(up), Some(down)) => {
+                    let sign_elapsed = sign_start.elapsed();
+                    info!("⚡ Using pre-signed orders (lookup: {:?})", sign_elapsed);
+                    (up, down)
+                }
+                _ => {
+                    // Fallback to on-demand signing
+                    warn!("Pre-signed orders not available, falling back to on-demand signing");
+                    let up = self.signer.create_order(
+                        &market.up_token_id,
+                        up_ask,
+                        shares,
+                        Side::Buy,
+                        market.tick_size,
+                        market.neg_risk,
+                    ).await?;
+
+                    let down = self.signer.create_order(
+                        &market.down_token_id,
+                        down_ask,
+                        shares,
+                        Side::Buy,
+                        market.tick_size,
+                        market.neg_risk,
+                    ).await?;
+
+                    let sign_elapsed = sign_start.elapsed();
+                    info!("🐌 On-demand signing: {:?}", sign_elapsed);
+                    (up, down)
+                }
+            }
+        } else {
+            // Standard mode: sign on-demand
+            let sign_start = std::time::Instant::now();
+
+            let up = self.signer.create_order(
+                &market.up_token_id,
+                up_ask,
+                shares,
+                Side::Buy,
+                market.tick_size,
+                market.neg_risk,
+            ).await?;
+
+            let down = self.signer.create_order(
+                &market.down_token_id,
+                down_ask,
+                shares,
+                Side::Buy,
+                market.tick_size,
+                market.neg_risk,
+            ).await?;
+
+            let sign_elapsed = sign_start.elapsed();
+            info!("Standard signing: {:?}", sign_elapsed);
+            (up, down)
+        };
 
         // Submit both orders simultaneously
         let (up_result, down_result) = tokio::join!(
@@ -463,12 +529,14 @@ impl LadderStrategy {
             }
         }
 
+        let total_elapsed = snipe_start.elapsed();
+
         if !up_ids.is_empty() && !down_ids.is_empty() {
             let profit = (dec!(1) - combined) * shares;
-            info!("🎯 Snipe successful! Potential profit: ${}", profit);
+            info!("🎯 Snipe successful! Potential profit: ${} | Total latency: {:?}", profit, total_elapsed);
             Ok(Some((up_ids, down_ids)))
         } else {
-            warn!("Snipe partially failed");
+            warn!("Snipe partially failed (latency: {:?})", total_elapsed);
             Ok(None)
         }
     }
