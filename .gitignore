@@ -1,0 +1,32 @@
+# Credentials - NEVER commit these
+.env
+*.pem
+
+# Data logs (can be large)
+/data/
+
+# Build artifacts
+/target/
+**/*.rs.bk
+
+# ML artifacts
+/ml/models/
+/ml/features/
+/ml/venv/
+/ml/.training_state.json
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+
+# Analysis files (large JSON)
+*_unique.json
+*_ALL_TRADES.csv
+*_trades.csv

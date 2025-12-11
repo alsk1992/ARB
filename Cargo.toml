@@ -1,0 +1,83 @@
+[package]
+name = "btc-arb-bot"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name"]
+description = "BTC 15-min arbitrage bot for Polymarket"
+
+[lib]
+name = "btc_arb_bot"
+path = "src/lib.rs"
+
+[[bin]]
+name = "btc-arb-bot"
+path = "src/main.rs"
+
+[[bin]]
+name = "test_signing"
+path = "src/bin/test_signing.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
+
+# WebSocket
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+
+# JSON
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Crypto - HMAC signing
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.21"
+
+# Crypto - EIP-712 signing
+ethers = { version = "2.0", features = ["rustls"] }
+
+# Decimal math (avoid floating point errors)
+rust_decimal = { version = "1.33", features = ["serde"] }
+rust_decimal_macros = "1.33"
+
+# Config
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# UUID for order salts
+uuid = { version = "1.6", features = ["v4"] }
+
+# Retry logic
+backoff = { version = "0.4", features = ["tokio"] }
+
+# Discord webhooks
+webhook = "2.1"
+
+# Metrics
+prometheus = "0.13"
+
+# Parking lot for faster mutexes
+parking_lot = "0.12"
+
+# Async trait for strategy trait
+async-trait = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
