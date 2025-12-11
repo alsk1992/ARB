@@ -326,6 +326,11 @@ async fn run_market_session(
                         if let Some(spread) = orderbook_manager.get_combined_spread(
                             &market.up_token_id, &market.down_token_id
                         ) {
+                            // Get full orderbook depth for ML
+                            let (up_bids, up_asks, down_bids, down_asks) = orderbook_manager
+                                .get_orderbook_depth(&market.up_token_id, &market.down_token_id)
+                                .unwrap_or_default();
+
                             // Log market snapshot for ML analysis
                             let _ = data_logger.log_market_snapshot(&MarketSnapshot {
                                 timestamp: chrono::Utc::now(),
@@ -340,6 +345,11 @@ async fn run_market_session(
                                 down_best_ask: Some(spread.down_best_ask),
                                 combined_ask: Some(spread.up_best_ask + spread.down_best_ask),
                                 spread_pct: Some(spread.spread_pct),
+                                // Full orderbook depth
+                                up_bids,
+                                up_asks,
+                                down_bids,
+                                down_asks,
                             });
                             // If spread is large enough, try to snipe
                             if spread.spread_pct >= config.target_spread_percent {

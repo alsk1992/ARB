@@ -26,6 +26,12 @@ pub struct MarketSnapshot {
     pub down_best_ask: Option<Decimal>,
     pub combined_ask: Option<Decimal>,
     pub spread_pct: Option<Decimal>,
+
+    // Full orderbook depth for ML training
+    pub up_bids: Vec<(String, String)>,      // [(price, size), ...]
+    pub up_asks: Vec<(String, String)>,
+    pub down_bids: Vec<(String, String)>,
+    pub down_asks: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

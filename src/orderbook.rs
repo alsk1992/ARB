@@ -97,6 +97,20 @@ impl LocalOrderbook {
             .sum()
     }
 
+    /// Get all bids as Vec for logging
+    pub fn get_bids(&self) -> Vec<(String, String)> {
+        self.bids.iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect()
+    }
+
+    /// Get all asks as Vec for logging
+    pub fn get_asks(&self) -> Vec<(String, String)> {
+        self.asks.iter()
+            .map(|(p, s)| (p.to_string(), s.to_string()))
+            .collect()
+    }
+
     /// Check if orderbook is stale
     pub fn is_stale(&self, max_age_ms: u64) -> bool {
         self.last_update.elapsed().as_millis() > max_age_ms as u128
@@ -160,6 +174,23 @@ impl OrderbookManager {
             spread_pct,
             is_profitable: combined_cost < dec!(1),
         })
+    }
+
+    /// Get full orderbook depth for both tokens (for ML logging)
+    pub fn get_orderbook_depth(&self, up_token: &str, down_token: &str) -> Option<(
+        Vec<(String, String)>, Vec<(String, String)>,  // up bids, up asks
+        Vec<(String, String)>, Vec<(String, String)>,  // down bids, down asks
+    )> {
+        let books = self.books.read();
+        let up_book = books.get(up_token)?;
+        let down_book = books.get(down_token)?;
+
+        Some((
+            up_book.get_bids(),
+            up_book.get_asks(),
+            down_book.get_bids(),
+            down_book.get_asks(),
+        ))
     }
 }
 
