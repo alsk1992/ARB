@@ -140,6 +140,68 @@ journalctl -u btc-arb-bot -f  # View logs
 
 Recommended: `c6i.large` in `us-east-1` (~$62/month) for lowest latency to Polymarket.
 
+## Remote Access
+
+### Quick Connect (after SSH config setup)
+```bash
+ssh arb                     # Connect to server
+ssh arb "cd ~/ARB && nvim ." # Open neovim on server
+```
+
+### SSH Config Setup
+Add to `~/.ssh/config`:
+```
+Host arb
+    HostName 3.237.6.125
+    User ubuntu
+    IdentityFile /path/to/btc-bot-key.pem
+```
+
+### Remote Editing Options
+
+**Option 1: SSH + Neovim on server (simplest)**
+```bash
+ssh arb
+cd ~/ARB && nvim .
+```
+
+**Option 2: SSHFS mount (edit locally)**
+```bash
+sudo apt install sshfs
+mkdir -p ~/arb-remote
+sshfs arb:~/ARB ~/arb-remote
+nvim ~/arb-remote/
+# Unmount when done: fusermount -u ~/arb-remote
+```
+
+**Option 3: Neovim built-in SCP**
+```bash
+nvim scp://arb//home/ubuntu/ARB/
+```
+
+**Option 4: rsync workflow**
+```bash
+# Pull changes
+rsync -avz arb:~/ARB/ ./ARB-local/
+# Push changes
+rsync -avz ./ARB-local/ arb:~/ARB/
+```
+
+### Useful Server Commands
+```bash
+# View bot logs
+ssh arb "journalctl -u btc-arb-bot -f"
+
+# Check ML server
+ssh arb "curl -s -X POST http://127.0.0.1:8765 -d '{\"spread_now\": 3.5}'"
+
+# Check processes
+ssh arb "ps aux | grep -E '(btc-arb|predict)'"
+
+# View collected data
+ssh arb "cat ~/ARB/data/summaries.jsonl"
+```
+
 ## Key Files to Understand
 
 1. **`src/signer.rs`** - EIP-712 signing (critical for orders to work)

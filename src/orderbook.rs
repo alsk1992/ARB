@@ -101,6 +101,16 @@ impl LocalOrderbook {
     pub fn is_stale(&self, max_age_ms: u64) -> bool {
         self.last_update.elapsed().as_millis() > max_age_ms as u128
     }
+
+    /// Get top N ask levels (lowest prices first)
+    pub fn top_asks(&self, n: usize) -> Vec<(Decimal, Decimal)> {
+        self.asks.iter().take(n).map(|(p, s)| (*p, *s)).collect()
+    }
+
+    /// Get top N bid levels (highest prices first)
+    pub fn top_bids(&self, n: usize) -> Vec<(Decimal, Decimal)> {
+        self.bids.iter().rev().take(n).map(|(p, s)| (*p, *s)).collect()
+    }
 }
 
 /// Thread-safe orderbook manager for multiple tokens
@@ -161,6 +171,30 @@ impl OrderbookManager {
             is_profitable: combined_cost < dec!(1),
         })
     }
+
+    /// Get orderbook depth for both UP and DOWN tokens
+    pub fn get_depth(&self, up_token: &str, down_token: &str, levels: usize) -> Option<OrderbookDepth> {
+        let books = self.books.read();
+
+        let up_book = books.get(up_token)?;
+        let down_book = books.get(down_token)?;
+
+        Some(OrderbookDepth {
+            up_asks: up_book.top_asks(levels),
+            up_bids: up_book.top_bids(levels),
+            down_asks: down_book.top_asks(levels),
+            down_bids: down_book.top_bids(levels),
+        })
+    }
+}
+
+/// Orderbook depth for both UP and DOWN tokens
+#[derive(Debug, Clone)]
+pub struct OrderbookDepth {
+    pub up_asks: Vec<(Decimal, Decimal)>,
+    pub up_bids: Vec<(Decimal, Decimal)>,
+    pub down_asks: Vec<(Decimal, Decimal)>,
+    pub down_bids: Vec<(Decimal, Decimal)>,
 }
 
 #[derive(Debug, Clone)]

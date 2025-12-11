@@ -23,7 +23,7 @@ use tracing_subscriber::FmtSubscriber;
 use crate::alerts::AlertClient;
 use crate::clob::ClobClient;
 use crate::config::Config;
-use crate::datalog::{DataLogger, MarketSnapshot, OrderLog, FillLog, SessionSummary};
+use crate::datalog::{DataLogger, MarketSnapshot, OrderLog, FillLog, SessionSummary, PriceLevel};
 use crate::market::MarketMonitor;
 use crate::ml_client::MlClient;
 use crate::orderbook::OrderbookManager;
@@ -326,6 +326,11 @@ async fn run_market_session(
                         if let Some(spread) = orderbook_manager.get_combined_spread(
                             &market.up_token_id, &market.down_token_id
                         ) {
+                            // Get orderbook depth (top 5 levels)
+                            let depth = orderbook_manager.get_depth(
+                                &market.up_token_id, &market.down_token_id, 5
+                            );
+
                             // Log market snapshot for ML analysis
                             let _ = data_logger.log_market_snapshot(&MarketSnapshot {
                                 timestamp: chrono::Utc::now(),
@@ -340,6 +345,11 @@ async fn run_market_session(
                                 down_best_ask: Some(spread.down_best_ask),
                                 combined_ask: Some(spread.up_best_ask + spread.down_best_ask),
                                 spread_pct: Some(spread.spread_pct),
+                                // Orderbook depth
+                                up_asks: depth.as_ref().map(|d| d.up_asks.iter().map(|(p, s)| PriceLevel { price: *p, size: *s }).collect()).unwrap_or_default(),
+                                up_bids: depth.as_ref().map(|d| d.up_bids.iter().map(|(p, s)| PriceLevel { price: *p, size: *s }).collect()).unwrap_or_default(),
+                                down_asks: depth.as_ref().map(|d| d.down_asks.iter().map(|(p, s)| PriceLevel { price: *p, size: *s }).collect()).unwrap_or_default(),
+                                down_bids: depth.as_ref().map(|d| d.down_bids.iter().map(|(p, s)| PriceLevel { price: *p, size: *s }).collect()).unwrap_or_default(),
                             });
                             // If spread is large enough, try to snipe
                             if spread.spread_pct >= config.target_spread_percent {

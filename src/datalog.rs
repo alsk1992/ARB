@@ -12,6 +12,13 @@ pub struct DataLogger {
     session_id: String,
 }
 
+/// Price level with price and size
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PriceLevel {
+    pub price: Decimal,
+    pub size: Decimal,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MarketSnapshot {
     pub timestamp: DateTime<Utc>,
@@ -26,6 +33,15 @@ pub struct MarketSnapshot {
     pub down_best_ask: Option<Decimal>,
     pub combined_ask: Option<Decimal>,
     pub spread_pct: Option<Decimal>,
+    // Orderbook depth - top 5 levels for each side
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub up_asks: Vec<PriceLevel>,    // UP token ask levels (price, size)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub up_bids: Vec<PriceLevel>,    // UP token bid levels
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub down_asks: Vec<PriceLevel>,  // DOWN token ask levels
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub down_bids: Vec<PriceLevel>,  // DOWN token bid levels
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
