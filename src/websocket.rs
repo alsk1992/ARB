@@ -157,29 +157,9 @@ impl WebSocketClient {
             info!("Subscribed to market channel (no tokens yet)");
         }
 
-        // Subscribe to user fills (authenticated) - only when we have specific tokens
-        // Polymarket rejects clob_user subscriptions without valid token context
-        if !token_ids.is_empty() {
-            let user_subscribe = json!({
-                "type": "subscribe",
-                "subscriptions": [{
-                    "topic": "clob_user",
-                    "type": "*",
-                    "clob_auth": {
-                        "key": self.config.api_key,
-                        "secret": self.config.api_secret,
-                        "passphrase": self.config.api_passphrase
-                    }
-                }]
-            });
-
-            write
-                .send(Message::Text(user_subscribe.to_string()))
-                .await
-                .context("Failed to subscribe to user fills")?;
-
-            info!("Subscribed to user fill notifications");
-        }
+        // Note: clob_user subscriptions require a separate WebSocket connection to /ws/user
+        // The /ws/market endpoint only handles market data (orderbooks, prices)
+        // For now, we'll poll for fills via REST API instead
 
         info!("Subscribed to all channels");
 
@@ -446,12 +426,15 @@ pub fn spawn_websocket_with_orderbook(
 
 /// Run a single WebSocket connection
 async fn run_websocket_connection(
-    config: Config,
+    _config: Config,
     event_tx: mpsc::Sender<WsEvent>,
     orderbook_manager: Arc<OrderbookManager>,
     token_ids: Vec<String>,
 ) -> Result<()> {
-    let url = &config.ws_url;
+    // Polymarket WebSocket endpoints:
+    // /ws/market - for market data (orderbooks, prices) - public
+    // /ws/user - for user data (orders, trades) - requires auth
+    let url = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
     info!("Connecting to WebSocket: {}", url);
 
     // Connect with timeout
@@ -466,85 +449,33 @@ async fn run_websocket_connection(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe to market creation events
+    // Subscribe to market channel with asset IDs
+    // Correct format per Polymarket docs: {"assets_ids": [...], "type": "market"}
     let market_subscribe = json!({
-        "type": "subscribe",
-        "subscriptions": [{
-            "topic": "clob_market",
-            "type": "market_created"
-        }]
+        "assets_ids": token_ids,
+        "type": "market"
     });
 
     write
         .send(Message::Text(market_subscribe.to_string()))
         .await
-        .context("Failed to subscribe to market_created")?;
+        .context("Failed to subscribe to market")?;
 
-    // Subscribe to orderbook updates for specific tokens
-    if !token_ids.is_empty() {
-        let orderbook_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_market",
-                "type": "agg_orderbook",
-                "filters": token_ids
-            }]
-        });
+    info!("Subscribed to market channel for {} tokens", token_ids.len());
 
-        write
-            .send(Message::Text(orderbook_subscribe.to_string()))
-            .await
-            .context("Failed to subscribe to orderbook")?;
+    // Note: User channel (orders/trades) requires separate connection to /ws/user with auth
 
-        let price_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_market",
-                "type": "price_change",
-                "filters": token_ids
-            }]
-        });
-
-        write
-            .send(Message::Text(price_subscribe.to_string()))
-            .await
-            .context("Failed to subscribe to price_change")?;
-    }
-
-    // Subscribe to user fills - only when we have specific tokens
-    // Polymarket rejects clob_user subscriptions without valid token context
-    if !token_ids.is_empty() {
-        let user_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_user",
-                "type": "*",
-                "clob_auth": {
-                    "key": config.api_key,
-                    "secret": config.api_secret,
-                    "passphrase": config.api_passphrase
-                }
-            }]
-        });
-
-        write
-            .send(Message::Text(user_subscribe.to_string()))
-            .await
-            .context("Failed to subscribe to user fills")?;
-    }
-
-    info!("Subscribed to all channels");
-
-    // Keep-alive ping task
+    // Keep-alive ping task (every 10 seconds per Polymarket docs)
     let ping_write = Arc::new(tokio::sync::Mutex::new(write));
     let ping_writer = ping_write.clone();
 
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
             let mut w = ping_writer.lock().await;
-            if w.send(Message::Ping(vec![])).await.is_err() {
+            // Polymarket expects text "PING" not binary ping frames
+            if w.send(Message::Text("PING".to_string())).await.is_err() {
                 break;
             }
         }
