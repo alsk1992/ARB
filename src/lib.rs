@@ -22,3 +22,4 @@ pub mod strategies;
 pub mod strategy;
 pub mod types;
 pub mod websocket;
+pub mod ws_clob;

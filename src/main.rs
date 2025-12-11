@@ -13,6 +13,7 @@ mod signer;
 mod strategy;
 mod types;
 mod websocket;
+mod ws_clob;
 
 use anyhow::Result;
 use parking_lot::Mutex;
