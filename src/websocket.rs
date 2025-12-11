@@ -157,6 +157,30 @@ impl WebSocketClient {
             info!("Subscribed to market channel (no tokens yet)");
         }
 
+        // Subscribe to user fills (authenticated) - only when we have specific tokens
+        // Polymarket rejects clob_user subscriptions without valid token context
+        if !token_ids.is_empty() {
+            let user_subscribe = json!({
+                "type": "subscribe",
+                "subscriptions": [{
+                    "topic": "clob_user",
+                    "type": "*",
+                    "clob_auth": {
+                        "key": self.config.api_key,
+                        "secret": self.config.api_secret,
+                        "passphrase": self.config.api_passphrase
+                    }
+                }]
+            });
+
+            write
+                .send(Message::Text(user_subscribe.to_string()))
+                .await
+                .context("Failed to subscribe to user fills")?;
+
+            info!("Subscribed to user fill notifications");
+        }
+
         info!("Subscribed to all channels");
 
         // Spawn ping task to keep connection alive (every 10 seconds as per docs)
@@ -487,24 +511,27 @@ async fn run_websocket_connection(
             .context("Failed to subscribe to price_change")?;
     }
 
-    // Subscribe to user fills
-    let user_subscribe = json!({
-        "type": "subscribe",
-        "subscriptions": [{
-            "topic": "clob_user",
-            "type": "*",
-            "clob_auth": {
-                "key": config.api_key,
-                "secret": config.api_secret,
-                "passphrase": config.api_passphrase
-            }
-        }]
-    });
+    // Subscribe to user fills - only when we have specific tokens
+    // Polymarket rejects clob_user subscriptions without valid token context
+    if !token_ids.is_empty() {
+        let user_subscribe = json!({
+            "type": "subscribe",
+            "subscriptions": [{
+                "topic": "clob_user",
+                "type": "*",
+                "clob_auth": {
+                    "key": config.api_key,
+                    "secret": config.api_secret,
+                    "passphrase": config.api_passphrase
+                }
+            }]
+        });
 
-    write
-        .send(Message::Text(user_subscribe.to_string()))
-        .await
-        .context("Failed to subscribe to user fills")?;
+        write
+            .send(Message::Text(user_subscribe.to_string()))
+            .await
+            .context("Failed to subscribe to user fills")?;
+    }
 
     info!("Subscribed to all channels");
 
