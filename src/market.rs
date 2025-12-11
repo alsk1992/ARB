@@ -191,9 +191,13 @@ impl MarketMonitor {
         market.end_time - Utc::now()
     }
 
-    /// Check if it's too late to enter a market (less than 2 minutes remaining)
+    /// Check if it's too late to enter a market (less than 13 minutes remaining)
+    /// BTC 15-min markets: enter early when spreads are widest (right at market open)
     pub fn is_too_late(market: &BtcMarket) -> bool {
-        Self::time_until_resolution(market) < chrono::Duration::minutes(2)
+        let remaining = Self::time_until_resolution(market);
+        // Skip if < 13 minutes (too late, spreads already tight)
+        // Skip if > 15 minutes (market not started yet)
+        remaining < chrono::Duration::minutes(13) || remaining > chrono::Duration::minutes(15)
     }
 
     /// Wait for next market window
