@@ -442,82 +442,34 @@ async fn run_websocket_connection(
 
     let (mut write, mut read) = ws_stream.split();
 
-    // Subscribe to market creation events
-    let market_subscribe = json!({
-        "type": "subscribe",
-        "subscriptions": [{
-            "topic": "clob_market",
-            "type": "market_created"
-        }]
-    });
-
-    write
-        .send(Message::Text(market_subscribe.to_string()))
-        .await
-        .context("Failed to subscribe to market_created")?;
-
-    // Subscribe to orderbook updates for specific tokens
+    // Subscribe to market orderbook
+    // Format: {"assets_ids": ["token1", "token2"], "type": "market"}
     if !token_ids.is_empty() {
-        let orderbook_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_market",
-                "type": "agg_orderbook",
-                "filters": token_ids
-            }]
+        let market_subscribe = json!({
+            "assets_ids": token_ids,
+            "type": "market"
         });
 
         write
-            .send(Message::Text(orderbook_subscribe.to_string()))
+            .send(Message::Text(market_subscribe.to_string()))
             .await
-            .context("Failed to subscribe to orderbook")?;
+            .context("Failed to subscribe to market")?;
 
-        let price_subscribe = json!({
-            "type": "subscribe",
-            "subscriptions": [{
-                "topic": "clob_market",
-                "type": "price_change",
-                "filters": token_ids
-            }]
-        });
-
-        write
-            .send(Message::Text(price_subscribe.to_string()))
-            .await
-            .context("Failed to subscribe to price_change")?;
+        info!("Subscribed to market channel for {} tokens", token_ids.len());
+    } else {
+        warn!("No token IDs provided, WebSocket may not receive updates");
     }
-
-    // Subscribe to user fills
-    let user_subscribe = json!({
-        "type": "subscribe",
-        "subscriptions": [{
-            "topic": "clob_user",
-            "type": "*",
-            "clob_auth": {
-                "key": config.api_key,
-                "secret": config.api_secret,
-                "passphrase": config.api_passphrase
-            }
-        }]
-    });
-
-    write
-        .send(Message::Text(user_subscribe.to_string()))
-        .await
-        .context("Failed to subscribe to user fills")?;
-
-    info!("Subscribed to all channels");
 
     // Keep-alive ping task
     let ping_write = Arc::new(tokio::sync::Mutex::new(write));
     let ping_writer = ping_write.clone();
 
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
             let mut w = ping_writer.lock().await;
-            if w.send(Message::Ping(vec![])).await.is_err() {
+            if w.send(Message::Text("PING".to_string())).await.is_err() {
                 break;
             }
         }
