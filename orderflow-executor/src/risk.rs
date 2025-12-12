@@ -1,5 +1,4 @@
 use anyhow::Result;
-use rust_decimal::Decimal;
 use sqlx::PgPool;
 use tracing::warn;
 
@@ -44,7 +43,7 @@ impl RiskManager {
     }
 
     async fn get_open_position_count(&self) -> Result<i32> {
-        let count = sqlx::query_scalar!(
+        let count: i64 = sqlx::query_scalar(
             r#"
             SELECT COUNT(*) as count
             FROM orderflow_positions
@@ -54,11 +53,11 @@ impl RiskManager {
         .fetch_one(&self.db)
         .await?;
 
-        Ok(count.unwrap_or(0) as i32)
+        Ok(count as i32)
     }
 
-    async fn get_daily_pnl(&self) -> Result<Decimal> {
-        let pnl = sqlx::query_scalar!(
+    async fn get_daily_pnl(&self) -> Result<f64> {
+        let pnl: f64 = sqlx::query_scalar(
             r#"
             SELECT COALESCE(SUM(profit_loss_usd), 0) as total_pnl
             FROM orderflow_signals
@@ -69,6 +68,6 @@ impl RiskManager {
         .fetch_one(&self.db)
         .await?;
 
-        Ok(pnl.unwrap_or(Decimal::ZERO))
+        Ok(pnl)
     }
 }

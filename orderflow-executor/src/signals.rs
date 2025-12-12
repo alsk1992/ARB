@@ -1,6 +1,5 @@
 use anyhow::Result;
-use rust_decimal::Decimal;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::{debug, info, warn};
 
 use crate::config::ExecutorConfig;
@@ -38,7 +37,7 @@ impl SignalGenerator {
         let mut signal_ids = Vec::new();
 
         // Find whale trades in the last 10 seconds that we haven't signaled yet
-        let recent_whale_trades = sqlx::query!(
+        let recent_whale_trades = sqlx::query(
             r#"
             SELECT
                 t.tx_hash,
@@ -65,9 +64,9 @@ impl SignalGenerator {
                 WHERE s.trigger_tx_hash = t.tx_hash
             )
             ORDER BY t.timestamp DESC
-            "#,
-            Decimal::try_from(self.config.min_whale_score).unwrap()
+            "#
         )
+        .bind(self.config.min_whale_score)
         .fetch_all(&self.db)
         .await?;
 
@@ -76,24 +75,34 @@ impl SignalGenerator {
                 continue;
             }
 
-            let wallet_score = trade.reputation_score.unwrap_or(Decimal::ZERO);
-            let confidence = (wallet_score.to_f64().unwrap_or(0.0) / 10.0).min(1.0);
+            let wallet_score: f64 = trade.try_get("reputation_score").unwrap_or(0.0);
+            let confidence = (wallet_score / 10.0).min(1.0);
 
+            let side: String = trade.get("side");
             // Only follow BUY signals from whales
-            if trade.side == "BUY" {
+            if side == "BUY" {
+                let tx_hash: String = trade.get("tx_hash");
+                let wallet_address: String = trade.get("wallet_address");
+                let market_id: String = trade.get("market_id");
+                let trader_tier: Option<String> = trade.try_get("trader_tier").ok();
+                let market_title: Option<String> = trade.try_get("market_title").ok();
+                let outcome: Option<String> = trade.try_get("outcome").ok();
+                let price: f64 = trade.get("price");
+                let size: f64 = trade.get("size");
+
                 let signal_id = self.create_signal(
-                    &trade.wallet_address,
-                    &trade.tx_hash,
+                    &wallet_address,
+                    &tx_hash,
                     wallet_score,
-                    &trade.trader_tier.unwrap_or("UNKNOWN".to_string()),
+                    &trader_tier.unwrap_or("UNKNOWN".to_string()),
                     SignalType::FollowWhale,
                     "BUY",
-                    &trade.market_id,
-                    trade.market_title.as_deref(),
-                    trade.outcome.as_deref().unwrap_or("YES"),
+                    &market_id,
+                    market_title.as_deref(),
+                    outcome.as_deref().unwrap_or("YES"),
                     confidence,
-                    trade.price,
-                    trade.size,
+                    price,
+                    size,
                 )
                 .await?;
 
@@ -101,9 +110,9 @@ impl SignalGenerator {
 
                 info!(
                     "🐋 WHALE SIGNAL: {} bought {} @ {} (score: {:.1}, confidence: {:.0}%)",
-                    trade.wallet_address,
-                    trade.outcome.unwrap_or("YES".to_string()),
-                    trade.price,
+                    wallet_address,
+                    outcome.unwrap_or("YES".to_string()),
+                    price,
                     wallet_score,
                     confidence * 100.0
                 );
@@ -123,7 +132,7 @@ impl SignalGenerator {
         let mut signal_ids = Vec::new();
 
         // Find markets where 5+ degens sold in last 30 seconds
-        let panic_markets = sqlx::query!(
+        let panic_markets = sqlx::query(
             r#"
             SELECT
                 t.market_id,
@@ -139,29 +148,33 @@ impl SignalGenerator {
             AND w.reputation_score <= $1
             GROUP BY t.market_id, t.outcome
             HAVING COUNT(*) >= 5
-            "#,
-            Decimal::try_from(self.config.max_fade_score).unwrap()
+            "#
         )
+        .bind(self.config.max_fade_score)
         .fetch_all(&self.db)
         .await?;
 
         for market in panic_markets {
             let confidence = 0.7; // Fixed confidence for panic fade signals
-            let avg_price = market.avg_price.unwrap_or(Decimal::ZERO);
+            let avg_price: f64 = market.try_get("avg_price").unwrap_or(0.0);
+            let market_id: String = market.get("market_id");
+            let market_title: Option<String> = market.try_get("market_title").ok();
+            let outcome: Option<String> = market.try_get("outcome").ok();
+            let panic_count: i64 = market.try_get("panic_count").unwrap_or(0);
 
             let signal_id = self.create_signal(
                 "MULTIPLE_DEGENS",
                 "PANIC_SELL",
-                Decimal::ZERO,
+                0.0,
                 "DEGEN",
                 SignalType::FadeDegen,
                 "BUY", // Buy what they're panic selling
-                &market.market_id,
-                market.market_title.as_deref(),
-                &market.outcome.unwrap_or("YES".to_string()),
+                &market_id,
+                market_title.as_deref(),
+                &outcome.clone().unwrap_or("YES".to_string()),
                 confidence,
                 avg_price,
-                Decimal::ZERO,
+                0.0,
             )
             .await?;
 
@@ -169,8 +182,8 @@ impl SignalGenerator {
 
             warn!(
                 "🚨 PANIC SIGNAL: {} degens sold {} @ {} - FADING!",
-                market.panic_count.unwrap_or(0),
-                market.outcome.unwrap_or("YES".to_string()),
+                panic_count,
+                outcome.unwrap_or("YES".to_string()),
                 avg_price
             );
         }
@@ -182,7 +195,7 @@ impl SignalGenerator {
         &self,
         trigger_wallet: &str,
         trigger_tx_hash: &str,
-        wallet_score: Decimal,
+        wallet_score: f64,
         trader_tier: &str,
         signal_type: SignalType,
         action: &str,
@@ -190,18 +203,16 @@ impl SignalGenerator {
         market_title: Option<&str>,
         outcome: &str,
         confidence: f64,
-        trigger_price: Decimal,
-        trigger_size: Decimal,
+        trigger_price: f64,
+        trigger_size: f64,
     ) -> Result<i64> {
         // Calculate recommended size using Kelly criterion
         let recommended_size = self.calculate_position_size(confidence, trigger_price);
 
         // Set max price (don't buy above this)
-        let max_price = trigger_price * Decimal::try_from(1.05).unwrap(); // 5% slippage tolerance
+        let max_price = trigger_price * 1.05; // 5% slippage tolerance
 
-        let confidence_decimal = Decimal::try_from(confidence).unwrap();
-
-        let signal_id = sqlx::query_scalar!(
+        let signal_id: i64 = sqlx::query_scalar(
             r#"
             INSERT INTO orderflow_signals (
                 trigger_wallet,
@@ -220,20 +231,20 @@ impl SignalGenerator {
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW() + INTERVAL '5 minutes')
             RETURNING id
-            "#,
-            trigger_wallet,
-            trigger_tx_hash,
-            wallet_score,
-            trader_tier,
-            signal_type.as_str(),
-            action,
-            market_id,
-            market_title,
-            outcome,
-            confidence_decimal,
-            recommended_size,
-            max_price
+            "#
         )
+        .bind(trigger_wallet)
+        .bind(trigger_tx_hash)
+        .bind(wallet_score)
+        .bind(trader_tier)
+        .bind(signal_type.as_str())
+        .bind(action)
+        .bind(market_id)
+        .bind(market_title)
+        .bind(outcome)
+        .bind(confidence)
+        .bind(recommended_size)
+        .bind(max_price)
         .fetch_one(&self.db)
         .await?;
 
@@ -250,7 +261,7 @@ impl SignalGenerator {
         Ok(signal_id)
     }
 
-    fn calculate_position_size(&self, confidence: f64, price: Decimal) -> Decimal {
+    fn calculate_position_size(&self, confidence: f64, price: f64) -> f64 {
         // Kelly criterion: f = (bp - q) / b
         // where:
         //   b = odds (profit if win)
@@ -259,16 +270,14 @@ impl SignalGenerator {
 
         let p = confidence;
         let q = 1.0 - p;
-        let price_f64 = price.to_f64().unwrap_or(0.5);
-        let b = (1.0 - price_f64) / price_f64; // Profit if win
+        let b = (1.0 - price) / price; // Profit if win
 
         let kelly = ((b * p) - q) / b;
         let fraction = kelly * self.config.kelly_fraction; // Use fraction of Kelly for safety
 
-        let size = Decimal::try_from(fraction).unwrap_or(Decimal::ZERO)
-            * self.config.max_position_usd;
+        let size = fraction * self.config.max_position_usd;
 
         // Ensure size is positive and within limits
-        size.max(Decimal::ZERO).min(self.config.max_position_usd)
+        size.max(0.0).min(self.config.max_position_usd)
     }
 }

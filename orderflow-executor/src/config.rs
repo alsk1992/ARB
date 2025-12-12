@@ -1,6 +1,4 @@
 use anyhow::{Context, Result};
-use rust_decimal::Decimal;
-use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
@@ -13,9 +11,9 @@ pub struct ExecutorConfig {
     pub private_key: Option<String>,
 
     // Risk management
-    pub max_position_usd: Decimal,
+    pub max_position_usd: f64,
     pub min_signal_confidence: f64,
-    pub max_daily_loss: Decimal,
+    pub max_daily_loss: f64,
     pub max_open_positions: i32,
 
     // Signal thresholds
@@ -40,17 +38,17 @@ impl ExecutorConfig {
 
             private_key: std::env::var("PRIVATE_KEY").ok(),
 
-            max_position_usd: Decimal::from_str(
-                &std::env::var("MAX_POSITION_USD").unwrap_or_else(|_| "1000".to_string())
-            )?,
+            max_position_usd: std::env::var("MAX_POSITION_USD")
+                .unwrap_or_else(|_| "1000".to_string())
+                .parse()?,
 
             min_signal_confidence: std::env::var("MIN_SIGNAL_CONFIDENCE")
                 .unwrap_or_else(|_| "0.7".to_string())
                 .parse()?,
 
-            max_daily_loss: Decimal::from_str(
-                &std::env::var("MAX_DAILY_LOSS").unwrap_or_else(|_| "500".to_string())
-            )?,
+            max_daily_loss: std::env::var("MAX_DAILY_LOSS")
+                .unwrap_or_else(|_| "500".to_string())
+                .parse()?,
 
             max_open_positions: std::env::var("MAX_OPEN_POSITIONS")
                 .unwrap_or_else(|_| "5".to_string())
