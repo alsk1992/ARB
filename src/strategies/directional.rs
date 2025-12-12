@@ -51,6 +51,10 @@ pub struct DirectionalConfig {
     pub use_limit_orders: bool,
     /// How far below best ask to place limit orders
     pub limit_offset: Decimal,
+    /// Number of price levels for laddering (1 = single order)
+    pub ladder_levels: u32,
+    /// Price spacing between ladder levels (e.g., 0.02 = 2 cents)
+    pub ladder_spacing: Decimal,
 }
 
 impl Default for DirectionalConfig {
@@ -64,6 +68,8 @@ impl Default for DirectionalConfig {
             max_position: dec!(500),
             use_limit_orders: true,
             limit_offset: dec!(0.02), // 2 cents below best ask
+            ladder_levels: 1,         // Default: single order (no laddering)
+            ladder_spacing: dec!(0.02), // 2 cents between levels
         }
     }
 }

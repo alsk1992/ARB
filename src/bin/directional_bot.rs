@@ -99,22 +99,35 @@ fn sqrt_approx(n: Decimal) -> Decimal {
 /// 15m-a4 STRATEGY: Enter with small moves, scale position by confidence
 fn confidence_position_sizing(
     btc_change_pct: Decimal,
-    base_position: Decimal,
-) -> (Decimal, &'static str) {
+    account_balance: Decimal,
+) -> (Decimal, &'static str, Decimal) {
     let abs_change = btc_change_pct.abs();
 
-    // 15m-a4 enters with small BTC moves (as low as 0.02%)
-    // Scale position size based on confidence
+    // Dynamic position sizing based on account balance and confidence
+    // Uses conservative Kelly-inspired percentages:
+    // - LOW confidence: 5-8% of balance (safer)
+    // - MED confidence: 10-12% of balance
+    // - HIGH confidence: 15-18% of balance
+    // - VERY HIGH: 20-25% of balance (max risk)
+
     if abs_change < dec!(0.02) {
-        (Decimal::ZERO, "TOO LOW (<0.02%) - NO TRADE")
+        (Decimal::ZERO, "TOO LOW (<0.02%) - NO TRADE", Decimal::ZERO)
     } else if abs_change < dec!(0.05) {
-        (base_position * dec!(0.3), "LOW (0.02-0.05%) - 30% pos")
+        let pct = dec!(0.08); // 8% of balance
+        let size = account_balance * pct;
+        (size, "LOW (0.02-0.05%) - 8%", pct * dec!(100))
     } else if abs_change < dec!(0.10) {
-        (base_position * dec!(0.6), "MED (0.05-0.10%) - 60% pos")
+        let pct = dec!(0.12); // 12% of balance
+        let size = account_balance * pct;
+        (size, "MED (0.05-0.10%) - 12%", pct * dec!(100))
     } else if abs_change < dec!(0.20) {
-        (base_position, "HIGH (0.10-0.20%) - 100% pos")
+        let pct = dec!(0.18); // 18% of balance
+        let size = account_balance * pct;
+        (size, "HIGH (0.10-0.20%) - 18%", pct * dec!(100))
     } else {
-        (base_position * dec!(1.5), "VERY HIGH (>0.20%) - 150% pos")
+        let pct = dec!(0.25); // 25% of balance (max)
+        let size = account_balance * pct;
+        (size, "VERY HIGH (>0.20%) - 25%", pct * dec!(100))
     }
 }
 
@@ -245,17 +258,16 @@ async fn main() -> Result<()> {
         max_position: config.max_position_usd,
         use_limit_orders: true,
         limit_offset: dec!(0.02), // 2 cents below best ask
+        ladder_levels: 5,        // 5 price levels like pro traders
+        ladder_spacing: dec!(0.02), // 2¢ between levels
     };
-
-    // Laddering config - place multiple orders at different price levels (TODO: implement)
-    let _ladder_levels = 5; // Number of price levels
-    let _ladder_spacing = dec!(0.02); // 2¢ between levels
 
     info!("Strategy config:");
     info!("  Entry window: minute {:.0}-{:.0}", strategy_config.entry_minute_min, strategy_config.entry_minute_max);
     info!("  Min confidence: {}%", strategy_config.min_confidence_pct);
     info!("  Max entry price: ${}", strategy_config.max_entry_price);
     info!("  Position size: ${}", strategy_config.position_size);
+    info!("  Laddering: {} levels @ {}¢ spacing", strategy_config.ladder_levels, strategy_config.ladder_spacing * dec!(100));
 
     // Initialize components
     let market_monitor = MarketMonitor::new(config.clone());
@@ -460,13 +472,13 @@ async fn run_directional_session(
                 {
                     // PRO TRADER: Skip choppy markets (2+ reversals)
                     if reversal_tracker.is_choppy() {
-                        debug!("Skipping: {} reversals detected (choppy market)", reversal_tracker.reversal_count);
+                        info!("⏭️ SKIP: Choppy market ({} reversals)", reversal_tracker.reversal_count);
                         continue;
                     }
 
                     // PRO TRADER: Require trend consistency (3+ same direction)
                     if !reversal_tracker.is_trend_consistent() {
-                        debug!("Trend not consistent: only {} consecutive same-direction readings", reversal_tracker.consecutive_same);
+                        info!("⏭️ SKIP: Trend not consistent ({}/3 readings)", reversal_tracker.consecutive_same);
                         continue;
                     }
 
@@ -482,11 +494,11 @@ async fn run_directional_session(
                             let volatility = volatility_tracker.lock().volatility_pct();
                             if let Some(vol) = volatility {
                                 if vol > dec!(0.5) {
-                                    debug!("Volatility too high: {:.4}% > 0.5% - skipping", vol);
+                                    info!("⏭️ SKIP: Volatility too high ({:.3}%)", vol);
                                     continue;
                                 }
                                 if vol < dec!(0.01) {
-                                    debug!("Market too flat: {:.4}% < 0.01% - skipping", vol);
+                                    info!("⏭️ SKIP: Market too flat ({:.4}%)", vol);
                                     continue;
                                 }
                             }
@@ -495,18 +507,18 @@ async fn run_directional_session(
                             let momentum_aligned = btc_feed.is_momentum_aligned();
                             let momentum_conf = btc_feed.get_momentum_confidence();
                             if !momentum_aligned && minute_of_period < 10.0 {
-                                debug!("Momentum not aligned early (min {:.1}) - waiting", minute_of_period);
+                                info!("⏭️ SKIP: Momentum not aligned (min {:.1}) - waiting", minute_of_period);
                                 continue;
                             }
 
-                            // CONFIDENCE-BASED POSITION SIZING
-                            let (position_size, confidence_level) = confidence_position_sizing(
+                            // CONFIDENCE-BASED POSITION SIZING (% of account balance)
+                            let (position_size, confidence_level, risk_pct) = confidence_position_sizing(
                                 pct,
-                                strategy_config.position_size,
+                                config.account_balance,
                             );
 
                             if position_size == Decimal::ZERO {
-                                debug!("Confidence too low: {:.4}% - {}", pct.abs(), confidence_level);
+                                info!("⏭️ SKIP: Confidence too low: {:.4}% - {}", pct.abs(), confidence_level);
                                 continue;
                             }
 
@@ -529,26 +541,76 @@ async fn run_directional_session(
                                     info!("  Minute: {:.1}", minute_of_period);
                                     info!("  Confidence: {} | Momentum: {:.1}", confidence_level, momentum_conf);
                                     info!("  Momentum aligned: {}", momentum_aligned);
-                                    info!("  Position size: ${}", position_size);
+                                    info!("  Account: ${} | Risk: {}% | Entry: ${}", config.account_balance, risk_pct, position_size.round_dp(2));
                                     if let Some(vol) = volatility {
                                         info!("  Volatility: {:.4}%", vol);
                                     }
 
-                                    // Calculate order
-                                    entry_price = if strategy_config.use_limit_orders {
-                                        (best_ask - strategy_config.limit_offset).max(dec!(0.01))
-                                    } else {
-                                        best_ask
-                                    };
-                                    let shares = position_size / entry_price;
+                                    // Calculate laddered orders
+                                    // Split position across multiple price levels
+                                    let levels = strategy_config.ladder_levels.max(1);
+                                    let size_per_level = position_size / Decimal::from(levels);
                                     minute_of_entry = minute_of_period;
 
-                                    if config.dry_run {
-                                        info!("[DRY RUN] Would buy {} {} shares at ${}", shares.round_dp(0), outcome, entry_price);
+                                    let mut total_shares = Decimal::ZERO;
+                                    let mut total_cost = Decimal::ZERO;
+                                    let mut avg_price = Decimal::ZERO;
+
+                                    info!("📊 LADDERING: {} levels, ${:.2} per level", levels, size_per_level);
+
+                                    for level in 0..levels {
+                                        // Calculate price for this level
+                                        let level_offset = strategy_config.ladder_spacing * Decimal::from(level);
+                                        let level_price = if strategy_config.use_limit_orders {
+                                            (best_ask - strategy_config.limit_offset - level_offset).max(dec!(0.01))
+                                        } else {
+                                            (best_ask - level_offset).max(dec!(0.01))
+                                        };
+                                        let level_shares = size_per_level / level_price;
+
+                                        if config.dry_run {
+                                            info!("  [L{}] {} shares @ {}¢", level + 1, level_shares.round_dp(0), level_price * dec!(100));
+                                            total_shares += level_shares;
+                                            total_cost += size_per_level;
+                                            avg_price += level_price;
+                                        } else {
+                                            // Live order placement
+                                            match create_and_submit_order(
+                                                clob,
+                                                signer,
+                                                token_id,
+                                                level_price,
+                                                level_shares,
+                                                market.tick_size,
+                                                market.neg_risk,
+                                            ).await {
+                                                Ok(order_id) => {
+                                                    info!("  [L{}] Order {}: {} shares @ {}¢", level + 1, order_id, level_shares.round_dp(0), level_price * dec!(100));
+                                                    total_shares += level_shares;
+                                                    total_cost += size_per_level;
+                                                    avg_price += level_price;
+                                                }
+                                                Err(e) => {
+                                                    warn!("  [L{}] Order failed: {}", level + 1, e);
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Set entry state
+                                    if total_shares > Decimal::ZERO {
+                                        entry_price = avg_price / Decimal::from(levels);
                                         has_entered = true;
-                                        position_shares = shares;
-                                        position_cost = position_size;
+                                        position_shares = total_shares;
+                                        position_cost = total_cost;
                                         predicted_outcome = Some(is_up);
+
+                                        info!("✅ ENTRY: {} {} shares, avg {}¢, total ${:.2}",
+                                            total_shares.round_dp(0), outcome, (entry_price * dec!(100)).round_dp(1), total_cost);
+
+                                        if !config.dry_run {
+                                            alerts.orders_submitted(levels as usize, 0, total_cost).await;
+                                        }
 
                                         // Log to database
                                         if let Some(ref db) = trade_db {
@@ -558,7 +620,7 @@ async fn run_directional_session(
                                                 market_title: market.title.clone(),
                                                 direction: outcome.to_string(),
                                                 entry_price,
-                                                shares,
+                                                shares: total_shares,
                                                 btc_open_price: open_price,
                                                 btc_entry_price: btc_price,
                                                 btc_change_pct: pct,
@@ -566,7 +628,7 @@ async fn run_directional_session(
                                                 minute_of_entry,
                                                 outcome: "PENDING".to_string(),
                                                 profit: Decimal::ZERO,
-                                                is_dry_run: true,
+                                                is_dry_run: config.dry_run,
                                             };
                                             match db.lock().insert_trade(&record) {
                                                 Ok(id) => {
@@ -576,39 +638,12 @@ async fn run_directional_session(
                                                 Err(e) => warn!("Failed to log trade: {}", e),
                                             }
                                         }
-                                    } else {
-                                        // Create and sign order
-                                        info!("Placing order: {} {} shares at ${}", shares.round_dp(0), outcome, entry_price);
-
-                                        // Build order using clob + signer
-                                        match create_and_submit_order(
-                                            clob,
-                                            signer,
-                                            token_id,
-                                            entry_price,
-                                            shares,
-                                            market.tick_size,
-                                            market.neg_risk,
-                                        ).await {
-                                            Ok(order_id) => {
-                                                info!("Order submitted: {}", order_id);
-                                                has_entered = true;
-                                                position_shares = shares;
-                                                position_cost = strategy_config.position_size;
-                                                predicted_outcome = Some(is_up);
-                                                alerts.orders_submitted(1, 0, strategy_config.position_size).await;
-                                            }
-                                            Err(e) => {
-                                                error!("Order failed: {}", e);
-                                                alerts.error("Order failed", &e.to_string()).await;
-                                            }
-                                        }
                                     }
                                 } else {
-                                    debug!("Price too high: {} > {}", best_ask, strategy_config.max_entry_price);
+                                    info!("⏭️ SKIP: Price too high: {} > {}", best_ask, strategy_config.max_entry_price);
                                 }
                             } else {
-                                debug!("Confidence too low: {:.4}% < {:.4}%", pct.abs(), strategy_config.min_confidence_pct);
+                                info!("⏭️ SKIP: Confidence {:.4}% < threshold {:.4}%", pct.abs(), strategy_config.min_confidence_pct);
                             }
                         }
                     }

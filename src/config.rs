@@ -15,6 +15,7 @@ pub struct Config {
 
     // Trading Parameters
     pub max_position_usd: Decimal,
+    pub account_balance: Decimal,  // For dynamic position sizing
     pub target_spread_percent: Decimal,
     pub min_spread_percent: Decimal,
 
@@ -54,6 +55,10 @@ impl Config {
                 .unwrap_or_else(|_| "1200".to_string())
                 .parse()
                 .context("Invalid MAX_POSITION_USD")?,
+            account_balance: env::var("ACCOUNT_BALANCE")
+                .unwrap_or_else(|_| "38".to_string())  // Default $38
+                .parse()
+                .context("Invalid ACCOUNT_BALANCE")?,
             target_spread_percent: env::var("TARGET_SPREAD_PERCENT")
                 .unwrap_or_else(|_| "4".to_string())
                 .parse()
