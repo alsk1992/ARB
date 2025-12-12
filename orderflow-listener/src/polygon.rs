@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use ethers::prelude::*;
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+use sha2::{Sha256, Digest};
 
 use crate::storage::TradeStorage;
 use crate::types::Trade;
@@ -89,18 +90,15 @@ impl PolygonListener {
     }
 
     async fn process_order_filled(&self, event: OrderFilledFilter) -> Result<()> {
-        // Generate base ID from event data
-        let base_id = format!(
-            "{}_{:?}_{:?}",
-            hex::encode(&event.order_hash),
-            event.maker,
-            event.taker
-        );
         let block_number = 0u64;  // Will be filled from actual block data later
         let timestamp = chrono::Utc::now();
 
-        // Create maker trade with unique tx_hash (includes maker address)
-        let maker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.maker);
+        // Create maker trade with unique tx_hash (hash of order_hash + maker address)
+        let maker_data = format!("{}_maker_{:?}", hex::encode(&event.order_hash), event.maker);
+        let mut hasher = Sha256::new();
+        hasher.update(maker_data.as_bytes());
+        let maker_tx_hash = format!("0x{}", hex::encode(hasher.finalize()));
+
         let mut maker_trade = Trade::new(
             maker_tx_hash,
             block_number,
@@ -120,8 +118,12 @@ impl PolygonListener {
                 / event.maker_amount_filled.as_u128() as f64;
         }
 
-        // Create taker trade with unique tx_hash (includes taker address)
-        let taker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.taker);
+        // Create taker trade with unique tx_hash (hash of order_hash + taker address)
+        let taker_data = format!("{}_taker_{:?}", hex::encode(&event.order_hash), event.taker);
+        let mut hasher = Sha256::new();
+        hasher.update(taker_data.as_bytes());
+        let taker_tx_hash = format!("0x{}", hex::encode(hasher.finalize()));
+
         let mut taker_trade = Trade::new(
             taker_tx_hash,
             block_number,
@@ -151,18 +153,20 @@ impl PolygonListener {
     }
 
     async fn process_orders_matched(&self, event: OrdersMatchedFilter) -> Result<()> {
-        // Generate base ID from event data
-        let base_id = format!(
-            "{}_{}_{}",
-            hex::encode(&event.maker_order_hash),
-            hex::encode(&event.taker_order_hash),
-            format!("{:?}{:?}", event.maker, event.taker)
-        );
         let block_number = 0u64;
         let timestamp = chrono::Utc::now();
 
-        // Maker trade with unique tx_hash
-        let maker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.maker);
+        // Maker trade with unique tx_hash (hash of both order hashes + maker address)
+        let maker_data = format!(
+            "{}_{}_{:?}_maker",
+            hex::encode(&event.maker_order_hash),
+            hex::encode(&event.taker_order_hash),
+            event.maker
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(maker_data.as_bytes());
+        let maker_tx_hash = format!("0x{}", hex::encode(hasher.finalize()));
+
         let mut maker_trade = Trade::new(
             maker_tx_hash,
             block_number,
@@ -181,8 +185,17 @@ impl PolygonListener {
                 / event.maker_amount_filled.as_u128() as f64;
         }
 
-        // Taker trade with unique tx_hash
-        let taker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.taker);
+        // Taker trade with unique tx_hash (hash of both order hashes + taker address)
+        let taker_data = format!(
+            "{}_{}_{:?}_taker",
+            hex::encode(&event.maker_order_hash),
+            hex::encode(&event.taker_order_hash),
+            event.taker
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(taker_data.as_bytes());
+        let taker_tx_hash = format!("0x{}", hex::encode(hasher.finalize()));
+
         let mut taker_trade = Trade::new(
             taker_tx_hash,
             block_number,
