@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::{debug, warn};
 
 use crate::types::Trade;
@@ -15,7 +15,7 @@ impl TradeStorage {
 
     pub async fn save_trade(&self, trade: &Trade) -> Result<()> {
         // Insert trade into orderflow_trades table
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"
             INSERT INTO orderflow_trades (
                 tx_hash, block_number, timestamp, wallet_address, is_maker,
@@ -27,24 +27,24 @@ impl TradeStorage {
                 $11, $12, $13, $14, $15, $16
             )
             ON CONFLICT (tx_hash) DO NOTHING
-            "#,
-            trade.tx_hash,
-            trade.block_number,
-            trade.timestamp,
-            trade.wallet_address,
-            trade.is_maker,
-            trade.market_id,
-            trade.market_title,
-            trade.token_id,
-            trade.outcome,
-            trade.side,
-            trade.price,
-            trade.size,
-            trade.value_usd,
-            trade.order_hash,
-            trade.fee_paid,
-            trade.gas_price,
+            "#
         )
+        .bind(&trade.tx_hash)
+        .bind(trade.block_number)
+        .bind(trade.timestamp)
+        .bind(&trade.wallet_address)
+        .bind(trade.is_maker)
+        .bind(&trade.market_id)
+        .bind(&trade.market_title)
+        .bind(&trade.token_id)
+        .bind(&trade.outcome)
+        .bind(&trade.side)
+        .bind(trade.price)
+        .bind(trade.size)
+        .bind(trade.value_usd)
+        .bind(&trade.order_hash)
+        .bind(trade.fee_paid)
+        .bind(trade.gas_price)
         .execute(&self.pool)
         .await;
 
@@ -75,18 +75,18 @@ impl TradeStorage {
     }
 
     pub async fn get_trade_count(&self) -> Result<i64> {
-        let result = sqlx::query_scalar!(
+        let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM orderflow_trades"
         )
         .fetch_one(&self.pool)
         .await
         .context("Failed to get trade count")?;
 
-        Ok(result.unwrap_or(0))
+        Ok(count)
     }
 
     pub async fn get_recent_trades(&self, limit: i64) -> Result<Vec<Trade>> {
-        let records = sqlx::query!(
+        let records = sqlx::query(
             r#"
             SELECT
                 tx_hash, block_number, timestamp, wallet_address, is_maker,
@@ -95,9 +95,9 @@ impl TradeStorage {
             FROM orderflow_trades
             ORDER BY timestamp DESC
             LIMIT $1
-            "#,
-            limit
+            "#
         )
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .context("Failed to fetch recent trades")?;
@@ -105,22 +105,22 @@ impl TradeStorage {
         let trades = records
             .into_iter()
             .map(|r| Trade {
-                tx_hash: r.tx_hash,
-                block_number: r.block_number,
-                timestamp: r.timestamp,
-                wallet_address: r.wallet_address,
-                is_maker: r.is_maker,
-                market_id: r.market_id,
-                market_title: r.market_title,
-                token_id: r.token_id,
-                outcome: r.outcome,
-                side: r.side,
-                price: r.price,
-                size: r.size,
-                value_usd: r.value_usd,
-                order_hash: r.order_hash,
-                fee_paid: r.fee_paid,
-                gas_price: r.gas_price,
+                tx_hash: r.get("tx_hash"),
+                block_number: r.get("block_number"),
+                timestamp: r.get("timestamp"),
+                wallet_address: r.get("wallet_address"),
+                is_maker: r.get("is_maker"),
+                market_id: r.get("market_id"),
+                market_title: r.get("market_title"),
+                token_id: r.get("token_id"),
+                outcome: r.get("outcome"),
+                side: r.get("side"),
+                price: r.get("price"),
+                size: r.get("size"),
+                value_usd: r.get("value_usd"),
+                order_hash: r.get("order_hash"),
+                fee_paid: r.get("fee_paid"),
+                gas_price: r.get("gas_price"),
             })
             .collect();
 
