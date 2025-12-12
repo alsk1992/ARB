@@ -89,10 +89,15 @@ impl PolygonListener {
     }
 
     async fn process_order_filled(&self, event: OrderFilledFilter) -> Result<()> {
-        // In ethers 2.0, event metadata is accessed differently
-        // For now, use placeholder values and current timestamp
-        let tx_hash = "0x0000000000000000000000000000000000000000000000000000000000000000".to_string();
-        let block_number = 0u64;
+        // Generate unique ID from event data (order_hash + maker + taker)
+        let unique_id = format!(
+            "{}_{:?}_{:?}",
+            hex::encode(&event.order_hash),
+            event.maker,
+            event.taker
+        );
+        let tx_hash = format!("0x{}", &unique_id[..64].chars().take(64).collect::<String>());
+        let block_number = 0u64;  // Will be filled from actual block data later
         let timestamp = chrono::Utc::now();
 
         // Create maker trade
@@ -145,9 +150,14 @@ impl PolygonListener {
     }
 
     async fn process_orders_matched(&self, event: OrdersMatchedFilter) -> Result<()> {
-        // In ethers 2.0, event metadata is accessed differently
-        // For now, use placeholder values and current timestamp
-        let tx_hash = "0x0000000000000000000000000000000000000000000000000000000000000000".to_string();
+        // Generate unique ID from event data
+        let unique_id = format!(
+            "{}_{}_{}",
+            hex::encode(&event.maker_order_hash),
+            hex::encode(&event.taker_order_hash),
+            format!("{:?}{:?}", event.maker, event.taker)
+        );
+        let tx_hash = format!("0x{}", &unique_id[..64].chars().take(64).collect::<String>());
         let block_number = 0u64;
         let timestamp = chrono::Utc::now();
 
