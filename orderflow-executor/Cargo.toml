@@ -36,5 +36,6 @@ hex = "0.4"
 # Environment
 dotenvy = "0.15"
 
-# Pin home crate to avoid edition2024 requirement
+# Pin crates to avoid edition2024 requirement
 home = "=0.5.9"
+base64ct = "=1.6.0"
