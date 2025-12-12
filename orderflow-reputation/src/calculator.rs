@@ -95,20 +95,28 @@ impl ReputationCalculator {
         Ok(reputation)
     }
 
-    /// Win rate: % of trades that were profitable
+    /// Win rate: % of closed positions that were profitable
+    /// Matches BUY/SELL pairs on same market+token to calculate realized P&L
     async fn get_win_rate(&self, wallet: &str) -> Result<f64> {
         let row = sqlx::query(
             r#"
+            WITH position_pairs AS (
+                SELECT
+                    (t2.price - t1.price) * t1.size as realized_pnl
+                FROM orderflow_trades t1
+                JOIN orderflow_trades t2
+                    ON t1.wallet_address = t2.wallet_address
+                    AND t1.market_id = t2.market_id
+                    AND t1.token_id = t2.token_id
+                WHERE t1.wallet_address = $1
+                    AND t1.side = 'BUY'
+                    AND t2.side = 'SELL'
+                    AND t2.timestamp > t1.timestamp
+            )
             SELECT
-                COUNT(CASE WHEN
-                    (t.side = 'BUY' AND t.outcome = m.winning_outcome) OR
-                    (t.side = 'SELL' AND t.outcome != m.winning_outcome)
-                THEN 1 END) as wins,
+                COUNT(CASE WHEN realized_pnl > 0 THEN 1 END) as wins,
                 COUNT(*) as total
-            FROM orderflow_trades t
-            JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
-            WHERE t.wallet_address = $1
-            AND m.resolved_at IS NOT NULL
+            FROM position_pairs
             "#
         )
         .bind(wallet)
@@ -117,7 +125,7 @@ impl ReputationCalculator {
 
         let total: i64 = row.try_get("total").unwrap_or(0);
         if total == 0 {
-            return Ok(0.5); // Neutral if no resolved trades
+            return Ok(0.5); // Neutral if no closed positions
         }
 
         let wins: i64 = row.try_get("wins").unwrap_or(0);
@@ -125,60 +133,74 @@ impl ReputationCalculator {
     }
 
     /// Profit factor: Average profit per trade as % of position size
+    /// Based on realized P&L from closed positions
     async fn get_profit_factor(&self, wallet: &str) -> Result<f64> {
         let row = sqlx::query(
             r#"
-            SELECT AVG(
-                CASE
-                    WHEN (t.side = 'BUY' AND t.outcome = m.winning_outcome) THEN
-                        ((1.0 - t.price::float) / t.price::float)
-                    WHEN (t.side = 'SELL' AND t.outcome != m.winning_outcome) THEN
-                        (t.price::float / (1.0 - t.price::float))
-                    ELSE -1.0
-                END
-            ) as avg_profit_factor
-            FROM orderflow_trades t
-            JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
-            WHERE t.wallet_address = $1
-            AND m.resolved_at IS NOT NULL
+            WITH position_pairs AS (
+                SELECT
+                    ((t2.price - t1.price) / t1.price) as profit_pct
+                FROM orderflow_trades t1
+                JOIN orderflow_trades t2
+                    ON t1.wallet_address = t2.wallet_address
+                    AND t1.market_id = t2.market_id
+                    AND t1.token_id = t2.token_id
+                WHERE t1.wallet_address = $1
+                    AND t1.side = 'BUY'
+                    AND t2.side = 'SELL'
+                    AND t2.timestamp > t1.timestamp
+            )
+            SELECT AVG(profit_pct) as avg_profit_pct
+            FROM position_pairs
             "#
         )
         .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let profit_factor: f64 = row.try_get("avg_profit_factor").unwrap_or(0.0);
+        let avg_profit_pct: Option<f64> = row.try_get("avg_profit_pct").ok();
 
-        // Normalize to 0-1 range (assume good traders make 20-30% per trade)
-        let normalized = (profit_factor + 1.0) / 2.5;
+        let profit_factor = avg_profit_pct.unwrap_or(0.0);
+
+        // Normalize to 0-1 range (assume good traders make 10-50% per round trip)
+        // 0% = 0.5, +50% = 1.0, -50% = 0.0
+        let normalized = (profit_factor + 0.5) / 1.0;
         Ok(normalized.max(0.0).min(1.0))
     }
 
-    /// Consistency: Low variance in results = better
+    /// Consistency: Low variance in P&L = better
     async fn get_consistency_score(&self, wallet: &str) -> Result<f64> {
         let row = sqlx::query(
             r#"
-            SELECT STDDEV(
-                CASE
-                    WHEN (t.side = 'BUY' AND t.outcome = m.winning_outcome) THEN 1.0
-                    WHEN (t.side = 'SELL' AND t.outcome != m.winning_outcome) THEN 1.0
-                    ELSE 0.0
-                END
-            ) as variance
-            FROM orderflow_trades t
-            JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
-            WHERE t.wallet_address = $1
-            AND m.resolved_at IS NOT NULL
+            WITH position_pairs AS (
+                SELECT
+                    CASE
+                        WHEN (t2.price - t1.price) > 0 THEN 1.0
+                        ELSE 0.0
+                    END as is_win
+                FROM orderflow_trades t1
+                JOIN orderflow_trades t2
+                    ON t1.wallet_address = t2.wallet_address
+                    AND t1.market_id = t2.market_id
+                    AND t1.token_id = t2.token_id
+                WHERE t1.wallet_address = $1
+                    AND t1.side = 'BUY'
+                    AND t2.side = 'SELL'
+                    AND t2.timestamp > t1.timestamp
+            )
+            SELECT STDDEV(is_win) as variance
+            FROM position_pairs
             "#
         )
         .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let variance: f64 = row.try_get("variance").unwrap_or(0.5);
+        let variance: Option<f64> = row.try_get("variance").ok();
+        let variance_val = variance.unwrap_or(0.5);
 
         // Lower variance = higher score
-        let consistency = 1.0 - variance.min(1.0);
+        let consistency = 1.0 - variance_val.min(1.0);
         Ok(consistency)
     }
 
@@ -191,27 +213,38 @@ impl ReputationCalculator {
         Ok(score.min(1.0))
     }
 
-    /// Timing score: Early entry = conviction
+    /// Timing score: Average hold duration (shorter = more conviction/skill)
     async fn get_timing_score(&self, wallet: &str) -> Result<f64> {
         let row = sqlx::query(
             r#"
-            SELECT AVG(
-                EXTRACT(EPOCH FROM (m.ends_at_timestamp - t.timestamp)) / 900.0
-            ) as avg_time_remaining
-            FROM orderflow_trades t
-            JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
-            WHERE t.wallet_address = $1
-            AND m.resolved_at IS NOT NULL
+            WITH position_pairs AS (
+                SELECT
+                    EXTRACT(EPOCH FROM (t2.timestamp - t1.timestamp)) / 3600.0 as hold_hours
+                FROM orderflow_trades t1
+                JOIN orderflow_trades t2
+                    ON t1.wallet_address = t2.wallet_address
+                    AND t1.market_id = t2.market_id
+                    AND t1.token_id = t2.token_id
+                WHERE t1.wallet_address = $1
+                    AND t1.side = 'BUY'
+                    AND t2.side = 'SELL'
+                    AND t2.timestamp > t1.timestamp
+            )
+            SELECT AVG(hold_hours) as avg_hold_hours
+            FROM position_pairs
             "#
         )
         .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let avg_time_remaining: f64 = row.try_get("avg_time_remaining").unwrap_or(0.5);
+        let avg_hold_hours: Option<f64> = row.try_get("avg_hold_hours").ok();
+        let hold_hours = avg_hold_hours.unwrap_or(24.0);
 
-        // Earlier entry (more time remaining) = higher score
-        Ok(avg_time_remaining.max(0.0).min(1.0))
+        // Shorter hold = higher score (scalpers are skilled)
+        // 1 hour = 1.0, 24 hours = 0.5, 168 hours (1 week) = 0.0
+        let score = 1.0 - (hold_hours / 168.0).min(1.0);
+        Ok(score.max(0.0))
     }
 
     async fn get_trade_count(&self, wallet: &str) -> Result<i64> {
