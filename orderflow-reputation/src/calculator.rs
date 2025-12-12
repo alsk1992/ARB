@@ -1,10 +1,10 @@
-use anyhow::{Context, Result};
+use anyhow::{Result};
 use rust_decimal::Decimal;
 use rust_decimal::prelude::*;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use tracing::{debug, info, warn};
 
-use crate::models::{ReputationScore, TraderTier};
+use crate::models::{ReputationScore};
 
 pub struct ReputationCalculator {
     db: PgPool,
@@ -18,16 +18,11 @@ impl ReputationCalculator {
     /// Calculate reputation for all wallets with recent activity
     pub async fn calculate_all_wallets(&self) -> Result<usize> {
         // Get all wallets with trades in the last 30 days
-        let wallets = sqlx::query_scalar!(
-            r#"
-            SELECT DISTINCT wallet_address
-            FROM orderflow_trades
-            WHERE timestamp > NOW() - INTERVAL '30 days'
-            "#
+        let wallets: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT wallet_address FROM orderflow_trades WHERE timestamp > NOW() - INTERVAL '30 days'"
         )
         .fetch_all(&self.db)
-        .await
-        .context("Failed to fetch active wallets")?;
+        .await?;
 
         info!("📊 Calculating reputation for {} wallets", wallets.len());
 
@@ -104,7 +99,7 @@ impl ReputationCalculator {
 
     /// Win rate: % of trades that were profitable
     async fn get_win_rate(&self, wallet: &str) -> Result<f64> {
-        let result = sqlx::query!(
+        let row = sqlx::query(
             r#"
             SELECT
                 COUNT(CASE WHEN
@@ -116,24 +111,24 @@ impl ReputationCalculator {
             JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
             WHERE t.wallet_address = $1
             AND m.resolved_at IS NOT NULL
-            "#,
-            wallet
+            "#
         )
+        .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let total = result.total.unwrap_or(0) as f64;
-        if total == 0.0 {
+        let total: i64 = row.try_get("total").unwrap_or(0);
+        if total == 0 {
             return Ok(0.5); // Neutral if no resolved trades
         }
 
-        let wins = result.wins.unwrap_or(0) as f64;
-        Ok(wins / total)
+        let wins: i64 = row.try_get("wins").unwrap_or(0);
+        Ok(wins as f64 / total as f64)
     }
 
     /// Profit factor: Average profit per trade as % of position size
     async fn get_profit_factor(&self, wallet: &str) -> Result<f64> {
-        let result = sqlx::query!(
+        let row = sqlx::query(
             r#"
             SELECT AVG(
                 CASE
@@ -148,13 +143,13 @@ impl ReputationCalculator {
             JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
             WHERE t.wallet_address = $1
             AND m.resolved_at IS NOT NULL
-            "#,
-            wallet
+            "#
         )
+        .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let profit_factor = result.avg_profit_factor.unwrap_or(0.0);
+        let profit_factor: f64 = row.try_get("avg_profit_factor").unwrap_or(0.0);
 
         // Normalize to 0-1 range (assume good traders make 20-30% per trade)
         let normalized = (profit_factor + 1.0) / 2.5;
@@ -163,7 +158,7 @@ impl ReputationCalculator {
 
     /// Consistency: Low variance in results = better
     async fn get_consistency_score(&self, wallet: &str) -> Result<f64> {
-        let result = sqlx::query!(
+        let row = sqlx::query(
             r#"
             SELECT STDDEV(
                 CASE
@@ -176,13 +171,13 @@ impl ReputationCalculator {
             JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
             WHERE t.wallet_address = $1
             AND m.resolved_at IS NOT NULL
-            "#,
-            wallet
+            "#
         )
+        .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let variance = result.variance.unwrap_or(0.5);
+        let variance: f64 = row.try_get("variance").unwrap_or(0.5);
 
         // Lower variance = higher score
         let consistency = 1.0 - variance.min(1.0);
@@ -200,7 +195,7 @@ impl ReputationCalculator {
 
     /// Timing score: Early entry = conviction
     async fn get_timing_score(&self, wallet: &str) -> Result<f64> {
-        let result = sqlx::query!(
+        let row = sqlx::query(
             r#"
             SELECT AVG(
                 EXTRACT(EPOCH FROM (m.ends_at_timestamp - t.timestamp)) / 900.0
@@ -209,27 +204,27 @@ impl ReputationCalculator {
             JOIN orderflow_market_outcomes m ON t.market_id = m.market_id
             WHERE t.wallet_address = $1
             AND m.resolved_at IS NOT NULL
-            "#,
-            wallet
+            "#
         )
+        .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        let avg_time_remaining = result.avg_time_remaining.unwrap_or(Some(0.5)).unwrap_or(0.5);
+        let avg_time_remaining: f64 = row.try_get("avg_time_remaining").unwrap_or(0.5);
 
         // Earlier entry (more time remaining) = higher score
         Ok(avg_time_remaining.max(0.0).min(1.0))
     }
 
     async fn get_trade_count(&self, wallet: &str) -> Result<i64> {
-        let result = sqlx::query_scalar!(
-            "SELECT COUNT(*) FROM orderflow_trades WHERE wallet_address = $1",
-            wallet
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM orderflow_trades WHERE wallet_address = $1"
         )
+        .bind(wallet)
         .fetch_one(&self.db)
         .await?;
 
-        Ok(result.unwrap_or(0))
+        Ok(count)
     }
 
     /// Confidence in reputation score based on sample size
@@ -253,7 +248,7 @@ impl ReputationCalculator {
         let confidence = Decimal::from_f64(reputation.confidence).unwrap_or(Decimal::ZERO);
         let tier = reputation.tier.as_str();
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO orderflow_wallet_stats (
                 wallet_address,
@@ -271,12 +266,12 @@ impl ReputationCalculator {
                 trader_tier = $4,
                 last_calculated_at = NOW(),
                 updated_at = NOW()
-            "#,
-            wallet,
-            score,
-            confidence,
-            tier
+            "#
         )
+        .bind(wallet)
+        .bind(score)
+        .bind(confidence)
+        .bind(tier)
         .execute(&self.db)
         .await?;
 
@@ -292,7 +287,7 @@ impl ReputationCalculator {
         let score = Decimal::from_f64(reputation.score).unwrap_or(Decimal::ZERO);
         let tier = reputation.tier.as_str();
 
-        sqlx::query!(
+        sqlx::query(
             r#"
             INSERT INTO orderflow_reputation_history (
                 wallet_address,
@@ -302,12 +297,12 @@ impl ReputationCalculator {
                 calculated_at
             )
             VALUES ($1, $2, $3, $4, NOW())
-            "#,
-            wallet,
-            score,
-            tier,
-            trade_count as i32
+            "#
         )
+        .bind(wallet)
+        .bind(score)
+        .bind(tier)
+        .bind(trade_count as i32)
         .execute(&self.db)
         .await?;
 
