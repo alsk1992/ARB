@@ -1,10 +1,8 @@
-use anyhow::{Result};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::*;
+use anyhow::Result;
 use sqlx::{PgPool, Row};
 use tracing::{debug, info, warn};
 
-use crate::models::{ReputationScore};
+use crate::models::ReputationScore;
 
 pub struct ReputationCalculator {
     db: PgPool,
@@ -244,10 +242,6 @@ impl ReputationCalculator {
     }
 
     async fn save_reputation(&self, wallet: &str, reputation: &ReputationScore) -> Result<()> {
-        let score = Decimal::from_f64(reputation.score).unwrap_or(Decimal::ZERO);
-        let confidence = Decimal::from_f64(reputation.confidence).unwrap_or(Decimal::ZERO);
-        let tier = reputation.tier.as_str();
-
         sqlx::query(
             r#"
             INSERT INTO orderflow_wallet_stats (
@@ -269,9 +263,9 @@ impl ReputationCalculator {
             "#
         )
         .bind(wallet)
-        .bind(score)
-        .bind(confidence)
-        .bind(tier)
+        .bind(reputation.score)
+        .bind(reputation.confidence)
+        .bind(reputation.tier.as_str())
         .execute(&self.db)
         .await?;
 
@@ -284,9 +278,6 @@ impl ReputationCalculator {
         reputation: &ReputationScore,
         trade_count: i64,
     ) -> Result<()> {
-        let score = Decimal::from_f64(reputation.score).unwrap_or(Decimal::ZERO);
-        let tier = reputation.tier.as_str();
-
         sqlx::query(
             r#"
             INSERT INTO orderflow_reputation_history (
@@ -300,8 +291,8 @@ impl ReputationCalculator {
             "#
         )
         .bind(wallet)
-        .bind(score)
-        .bind(tier)
+        .bind(reputation.score)
+        .bind(reputation.tier.as_str())
         .bind(trade_count as i32)
         .execute(&self.db)
         .await?;
