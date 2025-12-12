@@ -249,37 +249,46 @@ async fn run_market_session(
     }
 
     // Check spread before entering
-    if let Some(spread) = orderbook_manager.get_combined_spread(&market.up_token_id, &market.down_token_id) {
+    let should_trade = if let Some(spread) = orderbook_manager.get_combined_spread(&market.up_token_id, &market.down_token_id) {
         info!("Current spread: {}% (UP ask: {}, DOWN ask: {})",
             spread.spread_pct, spread.up_best_ask, spread.down_best_ask);
 
         if !spread.meets_threshold(config.min_spread_percent) {
-            warn!("Spread {}% below minimum {}%, skipping market",
+            warn!("Spread {}% below minimum {}%, monitoring only (no orders)",
                 spread.spread_pct, config.min_spread_percent);
-            alerts.warning(&format!("Skipping market - spread too tight: {}%", spread.spread_pct)).await;
-            return Ok(());
+            false  // Don't trade, just monitor
+        } else {
+            true  // Spread is good, we can trade
         }
-    }
-
-    // Submit ladder orders
-    info!("Submitting ladder orders...");
-    let (up_order_ids, down_order_ids) = match strategy.submit_ladder(market).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            error!("Failed to submit orders: {}", e);
-            alerts.error("Order submission failed", &e.to_string()).await;
-            return Err(e);
-        }
+    } else {
+        false  // No spread data, don't trade
     };
 
-    alerts.orders_submitted(
-        up_order_ids.len(),
-        down_order_ids.len(),
-        config.max_position_usd,
-    ).await;
+    // Submit ladder orders only if spread is good
+    let (up_order_ids, down_order_ids) = if should_trade {
+        info!("Submitting ladder orders...");
+        match strategy.submit_ladder(market).await {
+            Ok(ids) => {
+                alerts.orders_submitted(
+                    ids.0.len(),
+                    ids.1.len(),
+                    config.max_position_usd,
+                ).await;
+                ids
+            },
+            Err(e) => {
+                error!("Failed to submit orders: {}", e);
+                alerts.error("Order submission failed", &e.to_string()).await;
+                return Err(e);
+            }
+        }
+    } else {
+        info!("Monitoring mode: collecting data without trading");
+        (vec![], vec![])  // Empty order IDs
+    };
 
-    // Register orders for fill tracking
-    {
+    // Register orders for fill tracking (if any)
+    if !up_order_ids.is_empty() || !down_order_ids.is_empty() {
         let mut pm = position_manager.lock();
         pm.register_orders(&market.condition_id, &up_order_ids, &down_order_ids);
     }
