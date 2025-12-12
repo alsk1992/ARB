@@ -36,7 +36,7 @@ impl MarketMonitor {
         // Try current and next windows
         for offset in [0, 900] {
             let ts = window_start + offset;
-            let slug = format!("btc-updown-15m-{}", ts);
+            let slug = format!("{}-updown-15m-{}", self.config.market_asset, ts);
 
             if let Some(market) = self.fetch_market_by_slug(&slug).await? {
                 if market.end_time > now {

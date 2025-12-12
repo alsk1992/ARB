@@ -29,6 +29,9 @@ pub struct Config {
     // Alerts
     pub discord_webhook: Option<String>,
 
+    // Market Selection
+    pub market_asset: String,
+
     // Endpoints
     pub clob_url: String,
     pub ws_url: String,
@@ -82,6 +85,9 @@ impl Config {
 
             // Alerts
             discord_webhook: env::var("DISCORD_WEBHOOK").ok(),
+
+            // Market Selection
+            market_asset: env::var("MARKET_ASSET").unwrap_or_else(|_| "btc".to_string()),
 
             // Endpoints
             clob_url: "https://clob.polymarket.com".to_string(),

@@ -56,8 +56,9 @@ async fn main() -> Result<()> {
         .compact()
         .init();
 
+    let asset_display = config.market_asset.to_uppercase();
     info!("╔═══════════════════════════════════════╗");
-    info!("║     BTC 15-Min Arbitrage Bot          ║");
+    info!("║  {} 15-Min Arbitrage Bot{:width$}║", asset_display, "", width = 38 - asset_display.len());
     info!("║     Ladder Strategy Edition           ║");
     info!("╠═══════════════════════════════════════╣");
     info!("║ Mode: {:30} ║", if config.dry_run { "DRY RUN (no real orders)" } else { "LIVE TRADING" });
