@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,11 +13,11 @@ pub struct Trade {
     pub token_id: String,
     pub outcome: Option<String>,
     pub side: String, // BUY or SELL
-    pub price: Decimal,
-    pub size: Decimal,
-    pub value_usd: Option<Decimal>,
+    pub price: f64,
+    pub size: f64,
+    pub value_usd: Option<f64>,
     pub order_hash: Option<String>,
-    pub fee_paid: Option<Decimal>,
+    pub fee_paid: Option<f64>,
     pub gas_price: Option<i64>,
 }
 
@@ -54,8 +53,8 @@ impl Trade {
             token_id: String::new(),
             outcome: None,
             side: String::new(),
-            price: Decimal::ZERO,
-            size: Decimal::ZERO,
+            price: 0.0,
+            size: 0.0,
             value_usd: None,
             order_hash: None,
             fee_paid: None,
