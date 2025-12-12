@@ -171,4 +171,24 @@ impl AlertClient {
         );
         let _ = self.send(&msg, 0xFFA500).await; // Orange
     }
+
+    /// Alert: Market skipped (no entry)
+    pub async fn market_skipped(&self, market_time: &str, reason: &str, btc_change: Decimal) {
+        let direction = if btc_change > Decimal::ZERO { "📈" } else { "📉" };
+        let msg = format!(
+            "⏭️ <b>SKIP</b>: {}\n{} BTC: {:+.3}%\n💡 {}",
+            market_time, direction, btc_change, reason
+        );
+        let _ = self.send(&msg, 0xFFA500).await; // Orange
+    }
+
+    /// Alert: Market summary (entry taken)
+    pub async fn market_entry(&self, market_time: &str, direction: &str, entry_price: Decimal, shares: Decimal, btc_change: Decimal) {
+        let emoji = if direction == "UP" { "🟢" } else { "🔴" };
+        let msg = format!(
+            "{} <b>ENTRY</b>: {}\n{} {} @ {}¢\nBTC: {:+.3}%",
+            emoji, market_time, shares.round_dp(0), direction, (entry_price * Decimal::from(100)).round_dp(1), btc_change
+        );
+        let _ = self.send(&msg, 0x00FF00).await;
+    }
 }

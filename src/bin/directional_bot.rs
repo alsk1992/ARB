@@ -402,9 +402,13 @@ async fn run_directional_session(
     let mut entry_price = Decimal::ZERO;
     let mut trade_record_id: Option<i64> = None;
     let mut minute_of_entry = 0.0;
+    let mut skip_reason: Option<String> = None; // Track why we didn't enter
 
     // PRO TRADER: Track reversals and trend consistency
     let mut reversal_tracker = ReversalTracker::new();
+
+    // Extract market time for alerts (e.g., "1:00AM-1:15AM ET")
+    let market_time = market.title.split(" - ").last().unwrap_or(&market.title).to_string();
 
     // Monitor loop
     let end_time = market.end_time;
@@ -472,13 +476,15 @@ async fn run_directional_session(
                 {
                     // PRO TRADER: Skip choppy markets (2+ reversals)
                     if reversal_tracker.is_choppy() {
-                        info!("⏭️ SKIP: Choppy market ({} reversals)", reversal_tracker.reversal_count);
+                        skip_reason = Some(format!("Choppy market ({} reversals)", reversal_tracker.reversal_count));
+                        info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                         continue;
                     }
 
                     // PRO TRADER: Require trend consistency (3+ same direction)
                     if !reversal_tracker.is_trend_consistent() {
-                        info!("⏭️ SKIP: Trend not consistent ({}/3 readings)", reversal_tracker.consecutive_same);
+                        skip_reason = Some(format!("Trend not consistent ({}/3)", reversal_tracker.consecutive_same));
+                        info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                         continue;
                     }
 
@@ -494,11 +500,13 @@ async fn run_directional_session(
                             let volatility = volatility_tracker.lock().volatility_pct();
                             if let Some(vol) = volatility {
                                 if vol > dec!(0.5) {
-                                    info!("⏭️ SKIP: Volatility too high ({:.3}%)", vol);
+                                    skip_reason = Some(format!("Volatility too high ({:.3}%)", vol));
+                                    info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                                     continue;
                                 }
                                 if vol < dec!(0.01) {
-                                    info!("⏭️ SKIP: Market too flat ({:.4}%)", vol);
+                                    skip_reason = Some(format!("Market too flat ({:.4}%)", vol));
+                                    info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                                     continue;
                                 }
                             }
@@ -507,7 +515,8 @@ async fn run_directional_session(
                             let momentum_aligned = btc_feed.is_momentum_aligned();
                             let momentum_conf = btc_feed.get_momentum_confidence();
                             if !momentum_aligned && minute_of_period < 10.0 {
-                                info!("⏭️ SKIP: Momentum not aligned (min {:.1}) - waiting", minute_of_period);
+                                skip_reason = Some(format!("Momentum not aligned (min {:.1})", minute_of_period));
+                                info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                                 continue;
                             }
 
@@ -518,7 +527,8 @@ async fn run_directional_session(
                             );
 
                             if position_size == Decimal::ZERO {
-                                info!("⏭️ SKIP: Confidence too low: {:.4}% - {}", pct.abs(), confidence_level);
+                                skip_reason = Some(format!("Confidence too low ({:.4}%)", pct.abs()));
+                                info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                                 continue;
                             }
 
@@ -608,9 +618,8 @@ async fn run_directional_session(
                                         info!("✅ ENTRY: {} {} shares, avg {}¢, total ${:.2}",
                                             total_shares.round_dp(0), outcome, (entry_price * dec!(100)).round_dp(1), total_cost);
 
-                                        if !config.dry_run {
-                                            alerts.orders_submitted(levels as usize, 0, total_cost).await;
-                                        }
+                                        // Send Telegram alert for entry
+                                        alerts.market_entry(&market_time, outcome, entry_price, total_shares, pct).await;
 
                                         // Log to database
                                         if let Some(ref db) = trade_db {
@@ -640,10 +649,14 @@ async fn run_directional_session(
                                         }
                                     }
                                 } else {
-                                    info!("⏭️ SKIP: Price too high: {} > {}", best_ask, strategy_config.max_entry_price);
+                                    skip_reason = Some(format!("Price too high ({}¢ > {}¢)",
+                                        (best_ask * dec!(100)).round_dp(0),
+                                        (strategy_config.max_entry_price * dec!(100)).round_dp(0)));
+                                    info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                                 }
                             } else {
-                                info!("⏭️ SKIP: Confidence {:.4}% < threshold {:.4}%", pct.abs(), strategy_config.min_confidence_pct);
+                                skip_reason = Some(format!("BTC move too small ({:.4}%)", pct.abs()));
+                                info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                             }
                         }
                     }
@@ -737,7 +750,10 @@ async fn run_directional_session(
         }
     } else {
         info!("No position taken this session");
-        alerts.warning("No entry signal this session").await;
+        // Send skip reason to Telegram
+        let final_btc_change = btc_feed.get_price_change_pct().unwrap_or(Decimal::ZERO);
+        let reason = skip_reason.unwrap_or_else(|| "No clear signal".to_string());
+        alerts.market_skipped(&market_time, &reason, final_btc_change).await;
     }
 
     // Clear market open price
