@@ -509,8 +509,8 @@ async fn run_market_session(
         )).await;
     }
 
-    // Log result
-    alerts.market_resolved(&market.title, final_profit).await;
+    // Log result (main.rs doesn't track position details, so use None)
+    alerts.market_resolved(&market.title, final_profit, None, None).await;
 
     // Clear position
     {

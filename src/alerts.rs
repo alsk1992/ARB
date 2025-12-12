@@ -132,8 +132,14 @@ impl AlertClient {
         let _ = self.send(&msg, 0xFFFF00).await; // Yellow
     }
 
-    /// Alert: Market resolved
-    pub async fn market_resolved(&self, _title: &str, profit: Decimal) {
+    /// Alert: Market resolved with full stats
+    pub async fn market_resolved(
+        &self,
+        _title: &str,
+        profit: Decimal,
+        initial_cost: Option<Decimal>,
+        shares: Option<Decimal>,
+    ) {
         let (emoji, result) = if profit > Decimal::ZERO {
             ("🟢", "WIN")
         } else if profit < Decimal::ZERO {
@@ -142,9 +148,25 @@ impl AlertClient {
             ("⚪", "FLAT")
         };
         let color = if profit > Decimal::ZERO { 0x00FF00 } else { 0xFF0000 };
+
+        // Calculate ROI if we have initial cost
+        let roi_str = match initial_cost {
+            Some(cost) if cost > Decimal::ZERO => {
+                let roi = profit / cost * Decimal::from(100);
+                format!(" ({:+.1}%)", roi)
+            }
+            _ => String::new(),
+        };
+
+        // Show shares and initial cost if available
+        let details_str = match (shares, initial_cost) {
+            (Some(s), Some(c)) => format!("\n📊 {} shares @ ${:.2}", s.round_dp(0), c.round_dp(2)),
+            _ => String::new(),
+        };
+
         let msg = format!(
-            "{} <b>{}</b>: ${:.2}",
-            emoji, result, profit
+            "{} <b>{}</b>: ${:.2}{}{}",
+            emoji, result, profit.abs(), roi_str, details_str
         );
         let _ = self.send(&msg, color).await;
     }

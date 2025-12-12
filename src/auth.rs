@@ -1,5 +1,5 @@
 use anyhow::Result;
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{engine::general_purpose::URL_SAFE as BASE64, Engine};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -60,11 +60,12 @@ pub fn generate_headers(
     )?;
 
     Ok(vec![
-        ("POLY-ADDRESS".to_string(), config.address.clone()),
-        ("POLY-API-KEY".to_string(), config.api_key.clone()),
-        ("POLY-PASSPHRASE".to_string(), config.api_passphrase.clone()),
-        ("POLY-TIMESTAMP".to_string(), timestamp),
-        ("POLY-SIGNATURE".to_string(), signature),
+        // Official header names use UNDERSCORES (per py-clob-client)
+        ("POLY_ADDRESS".to_string(), config.address.clone()),
+        ("POLY_API_KEY".to_string(), config.api_key.clone()),
+        ("POLY_PASSPHRASE".to_string(), config.api_passphrase.clone()),
+        ("POLY_TIMESTAMP".to_string(), timestamp),
+        ("POLY_SIGNATURE".to_string(), signature),
         ("Content-Type".to_string(), "application/json".to_string()),
     ])
 }

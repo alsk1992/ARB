@@ -34,6 +34,9 @@ pub struct Config {
     pub clob_url: String,
     pub ws_url: String,
     pub gamma_url: String,
+
+    // Lambda proxy for bypassing Cloudflare (optional)
+    pub lambda_proxy_url: Option<String>,
 }
 
 impl Config {
@@ -92,6 +95,9 @@ impl Config {
             clob_url: "https://clob.polymarket.com".to_string(),
             ws_url: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_string(),
             gamma_url: "https://gamma-api.polymarket.com".to_string(),
+
+            // Lambda proxy URL (set LAMBDA_PROXY_URL to enable)
+            lambda_proxy_url: env::var("LAMBDA_PROXY_URL").ok(),
         })
     }
 }

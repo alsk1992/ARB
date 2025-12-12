@@ -131,6 +131,21 @@ fn confidence_position_sizing(
     }
 }
 
+/// Scale position size based on entry price
+/// Higher entry price = lower ROI potential = need MORE shares to compensate
+/// Based on 15m-a4's actual strategy: they trade at ALL prices (5-74¢)
+fn scale_position_by_price(base_size: Decimal, entry_price: Decimal) -> Decimal {
+    if entry_price < dec!(0.30) {
+        base_size                    // 100% - high ROI potential (200-400%)
+    } else if entry_price < dec!(0.50) {
+        base_size * dec!(1.25)       // 125% - medium ROI (100-200%)
+    } else if entry_price < dec!(0.70) {
+        base_size * dec!(1.50)       // 150% - lower ROI (40-100%)
+    } else {
+        base_size * dec!(1.75)       // 175% - lowest ROI (30-40%), max size
+    }
+}
+
 /// Tracks direction reversals during a session
 struct ReversalTracker {
     last_direction: Option<bool>,  // true=UP, false=DOWN
@@ -172,7 +187,7 @@ impl ReversalTracker {
     }
 
     fn is_choppy(&self) -> bool {
-        self.reversal_count >= 2
+        self.reversal_count >= 5  // Increased from 2 to match 15m-a4 (trade more markets)
     }
 
     fn is_trend_consistent(&self) -> bool {
@@ -252,8 +267,8 @@ async fn main() -> Result<()> {
     let strategy_config = DirectionalConfig {
         entry_minute_min: 3.0,   // Enter from minute 3 (catches 15-50¢ prices)
         entry_minute_max: 13.5,  // Stop by minute 13.5 (safety buffer)
-        min_confidence_pct: dec!(0.02), // Match 15m-a4: enter with small BTC moves
-        max_entry_price: dec!(0.75), // Match 15m-a4 max (74¢)
+        min_confidence_pct: dec!(0.03), // Balanced: 0.03% catches most wins, avoids weak signals
+        max_entry_price: dec!(0.90), // Allow up to 90¢ (15m-a4 trades 5-74¢, compensates with size)
         position_size: config.max_position_usd,
         max_position: config.max_position_usd,
         use_limit_orders: true,
@@ -268,7 +283,7 @@ async fn main() -> Result<()> {
     info!("  Max entry price: ${}", strategy_config.max_entry_price);
     info!("  Position size: ${}", strategy_config.position_size);
     info!("  Laddering: {} levels @ {}¢ spacing", strategy_config.ladder_levels, strategy_config.ladder_spacing * dec!(100));
-    info!("  DCA: 3 entries (min 5-6, 8-9, 11-12) @ 33%/33%/34%");
+    info!("  Single entry: minute 8-12, 100% position (like 15m-a4)");
 
     // Initialize components
     let market_monitor = MarketMonitor::new(config.clone());
@@ -407,13 +422,12 @@ async fn run_directional_session(
 
     // DCA: Track entry count and windows
     // Entry 1: minute 5-6 (33% of position)
-    // Entry 2: minute 8-9 (33% of position) - only if signal still valid
-    // Entry 3: minute 11-12 (34% of position) - only if signal still valid
+    // SINGLE ENTRY (like 15m-a4) - wait until confident, then go all-in
+    // 15m-a4 doesn't use DCA - they make ONE concentrated entry when outcome is clear
+    // By minute 8-12, BTC direction is 90%+ certain
     let mut entry_count = 0u32;
-    const DCA_WINDOWS: [(f64, f64, Decimal); 3] = [
-        (5.0, 6.5, dec!(0.33)),   // Entry 1: minute 5-6.5, 33%
-        (8.0, 9.5, dec!(0.33)),   // Entry 2: minute 8-9.5, 33%
-        (11.0, 12.5, dec!(0.34)), // Entry 3: minute 11-12.5, 34%
+    const DCA_WINDOWS: [(f64, f64, Decimal); 1] = [
+        (8.0, 12.0, dec!(1.00)),  // Single entry: minute 8-12, 100% of position
     ];
 
     // PRO TRADER: Track reversals and trend consistency
@@ -577,17 +591,25 @@ async fn run_directional_session(
 
                                 // Check price is acceptable
                                 if best_ask <= strategy_config.max_entry_price {
+                                    // PRICE-SCALED POSITION SIZING
+                                    // Higher entry price = lower ROI = need MORE shares
+                                    let scaled_position = scale_position_by_price(position_size, best_ask);
+                                    let price_scale = if position_size > Decimal::ZERO {
+                                        (scaled_position / position_size * dec!(100)).round_dp(0)
+                                    } else {
+                                        dec!(100)
+                                    };
+
                                     info!("╔═══════════════════════════════════════════════════╗");
-                                    info!("║      DCA ENTRY {} of 3 DETECTED!                   ║", entry_count + 1);
+                                    info!("║      DCA ENTRY {} of 2 DETECTED!                   ║", entry_count + 1);
                                     info!("╚═══════════════════════════════════════════════════╝");
                                     info!("  BTC: ${} ({:+.4}% from open)", btc_price.round_dp(2), pct);
                                     info!("  Direction: {}", outcome);
-                                    info!("  Best ask: ${}", best_ask);
+                                    info!("  Best ask: {}¢ → {}% size", (best_ask * dec!(100)).round_dp(0), price_scale);
                                     info!("  Minute: {:.1}", minute_of_period);
-                                    info!("  DCA: Entry {}/3 ({}%)", entry_count + 1, (dca_pct * dec!(100)).round_dp(0));
+                                    info!("  DCA: Entry {}/2 ({}%)", entry_count + 1, (dca_pct * dec!(100)).round_dp(0));
                                     info!("  Confidence: {} | Momentum: {:.1}", confidence_level, momentum_conf);
-                                    info!("  Momentum aligned: {}", momentum_aligned);
-                                    info!("  Account: ${} | Risk: {}% | DCA Entry: ${}", config.account_balance, risk_pct, position_size.round_dp(2));
+                                    info!("  Position: ${:.2} base → ${:.2} scaled", position_size, scaled_position);
                                     if let Some(vol) = volatility {
                                         info!("  Volatility: {:.4}%", vol);
                                     }
@@ -595,7 +617,7 @@ async fn run_directional_session(
                                     // Calculate laddered orders
                                     // Split position across multiple price levels
                                     let levels = strategy_config.ladder_levels.max(1);
-                                    let size_per_level = position_size / Decimal::from(levels);
+                                    let size_per_level = scaled_position / Decimal::from(levels);
                                     minute_of_entry = minute_of_period;
 
                                     let mut total_shares = Decimal::ZERO;
@@ -778,12 +800,12 @@ async fn run_directional_session(
             let profit = position_shares - position_cost;
             let roi = profit / position_cost * dec!(100);
             info!("Profit: ${} ({:.1}% ROI)", profit.round_dp(2), roi);
-            alerts.market_resolved(&market.title, profit).await;
+            alerts.market_resolved(&market.title, profit, Some(position_cost), Some(position_shares)).await;
             profit
         } else {
             let loss = position_cost;
             info!("Loss: ${}", loss.round_dp(2));
-            alerts.market_resolved(&market.title, -loss).await;
+            alerts.market_resolved(&market.title, -loss, Some(position_cost), Some(position_shares)).await;
             -loss
         };
 

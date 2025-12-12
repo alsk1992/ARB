@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 use serde_json::json;
 use std::collections::HashMap;
 use std::time::Instant;
-use tracing::{debug, info, trace};
+use tracing::{debug, info, warn, trace};
 
 use crate::auth::generate_headers;
 use crate::config::Config;
@@ -12,21 +12,180 @@ use crate::types::{Orderbook, Order, SignedOrder, OrderType, Side};
 
 pub struct ClobClient {
     client: Client,
+    proxy_client: Option<Client>,  // Client with residential proxy
     config: Config,
+    scrapeless_token: Option<String>,
 }
 
 impl ClobClient {
     pub fn new(config: Config) -> Result<Self> {
-        // Optimized HTTP client for low latency
+        // HTTP client (direct)
         let client = Client::builder()
-            .tcp_nodelay(true)                     // Disable Nagle's algorithm
-            .pool_max_idle_per_host(10)            // Keep connections warm
-            .pool_idle_timeout(std::time::Duration::from_secs(90)) // Keep alive longer
-            .timeout(std::time::Duration::from_secs(10))  // Overall timeout
-            .connect_timeout(std::time::Duration::from_secs(5)) // Fast connect timeout
+            .tcp_nodelay(true)
+            .pool_max_idle_per_host(10)
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .timeout(std::time::Duration::from_secs(30))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .user_agent("py_clob_client")
             .build()?;
 
-        Ok(Self { client, config })
+        // Build proxy client if PROXY_URL is set (residential proxy for Cloudflare bypass)
+        let proxy_client = if let Ok(proxy_url) = std::env::var("PROXY_URL") {
+            match reqwest::Proxy::all(&proxy_url) {
+                Ok(proxy) => {
+                    match Client::builder()
+                        .proxy(proxy)
+                        .tcp_nodelay(true)
+                        .timeout(std::time::Duration::from_secs(30))
+                        .connect_timeout(std::time::Duration::from_secs(10))
+                        .user_agent("py_clob_client")
+                        .build()
+                    {
+                        Ok(c) => {
+                            info!("Residential proxy enabled: {}", proxy_url.split('@').last().unwrap_or("configured"));
+                            Some(c)
+                        }
+                        Err(e) => {
+                            warn!("Failed to build proxy client: {}", e);
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Invalid PROXY_URL: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Check for Scrapeless API token (for Cloudflare bypass)
+        let scrapeless_token = std::env::var("SCRAPELESS_TOKEN").ok();
+        if scrapeless_token.is_some() {
+            info!("Scrapeless proxy also enabled for Cloudflare bypass");
+        }
+
+        Ok(Self { client, proxy_client, config, scrapeless_token })
+    }
+
+    /// Make a POST request through residential proxy (bypasses Cloudflare)
+    async fn post_via_proxy(
+        &self,
+        path: &str,
+        body: &str,
+        headers: &[(String, String)],
+    ) -> Result<serde_json::Value> {
+        let proxy_client = self.proxy_client.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("PROXY_URL not configured"))?;
+
+        let url = format!("{}{}", self.config.clob_url, path);
+
+        let mut request = proxy_client.post(&url);
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+
+        let response = request
+            .body(body.to_string())
+            .send()
+            .await
+            .context("Failed to POST via residential proxy")?;
+
+        let status = response.status();
+        let result: serde_json::Value = response.json().await
+            .context("Failed to parse response from proxy")?;
+
+        // Check for Cloudflare block
+        if status.as_u16() == 403 {
+            anyhow::bail!("Cloudflare blocked request (403 via proxy)");
+        }
+
+        // Check for Polymarket errors
+        if let Some(error) = result.get("error").and_then(|e| e.as_str()) {
+            if error.contains("Unauthorized") {
+                anyhow::bail!("Polymarket auth error: {}", error);
+            }
+        }
+
+        if !status.is_success() {
+            anyhow::bail!("Proxy POST failed: {} - {:?}", status, result);
+        }
+
+        Ok(result)
+    }
+
+    /// Make a POST request through Scrapeless proxy (bypasses Cloudflare)
+    /// Uses German residential IP which is not blocked
+    async fn post_via_scrapeless(
+        &self,
+        path: &str,
+        body: &str,
+        headers: &[(String, String)],
+    ) -> Result<serde_json::Value> {
+        let token = self.scrapeless_token.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SCRAPELESS_TOKEN not configured"))?;
+
+        // Build header object for Scrapeless
+        let mut header_obj = serde_json::Map::new();
+        header_obj.insert("Content-Type".to_string(), json!("application/json"));
+        for (key, value) in headers {
+            header_obj.insert(key.clone(), json!(value));
+        }
+
+        let url = format!("https://clob.polymarket.com{}", path);
+
+        let scrapeless_request = json!({
+            "actor": "unlocker.webunlocker",
+            "proxy": {
+                "country": "DE"  // German IPs bypass Cloudflare
+            },
+            "input": {
+                "url": url,
+                "method": "POST",
+                "redirect": false,
+                "header": header_obj,
+                "body": body
+            }
+        });
+
+        let response = self.client
+            .post("https://api.scrapeless.com/api/v1/unlocker/request")
+            .header("x-api-token", token)
+            .header("Content-Type", "application/json")
+            .json(&scrapeless_request)
+            .send()
+            .await
+            .context("Failed to send request via Scrapeless")?;
+
+        let result: serde_json::Value = response.json().await
+            .context("Failed to parse Scrapeless response")?;
+
+        // Check Scrapeless response code
+        let code = result.get("code").and_then(|c| c.as_u64()).unwrap_or(0);
+        if code != 200 {
+            let msg = result.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown error");
+            anyhow::bail!("Scrapeless error {}: {}", code, msg);
+        }
+
+        // Parse the data field (which contains the actual response)
+        let data_str = result.get("data").and_then(|d| d.as_str())
+            .ok_or_else(|| anyhow::anyhow!("No data in Scrapeless response"))?;
+
+        // Check if it's an HTML error page
+        if data_str.contains("<!DOCTYPE") || data_str.contains("<html") {
+            anyhow::bail!("Cloudflare blocked request (HTML response)");
+        }
+
+        let data: serde_json::Value = serde_json::from_str(data_str)
+            .context("Failed to parse Polymarket response from Scrapeless")?;
+
+        // Check for Polymarket errors
+        if let Some(error) = data.get("error").and_then(|e| e.as_str()) {
+            anyhow::bail!("Polymarket error: {}", error);
+        }
+
+        Ok(data)
     }
 
     /// Get orderbook for a token
@@ -99,6 +258,7 @@ impl ClobClient {
     }
 
     /// Post a signed order to CLOB
+    /// Priority: 1) Residential proxy, 2) Scrapeless, 3) Lambda proxy, 4) Direct
     pub async fn post_order(&self, order: &Order) -> Result<serde_json::Value> {
         let total_start = Instant::now();
 
@@ -110,19 +270,77 @@ impl ClobClient {
         let headers = generate_headers(&self.config, "POST", path, &body)?;
         let auth_time = auth_start.elapsed();
 
-        let url = format!("{}{}", self.config.clob_url, path);
-
-        let mut request = self.client.post(&url);
-        for (key, value) in headers {
-            request = request.header(&key, &value);
+        // Try residential proxy first (fastest, most reliable)
+        if self.proxy_client.is_some() {
+            let http_start = Instant::now();
+            match self.post_via_proxy(path, &body, &headers).await {
+                Ok(result) => {
+                    let http_time = http_start.elapsed();
+                    let total_time = total_start.elapsed();
+                    info!("CLOB POST via residential proxy: json={:?} auth={:?} http={:?} TOTAL={:?}",
+                        json_time, auth_time, http_time, total_time);
+                    info!("Order posted successfully via proxy: {:?}", result);
+                    return Ok(result);
+                }
+                Err(e) => {
+                    warn!("Residential proxy failed: {}, trying Scrapeless...", e);
+                }
+            }
         }
 
+        // Try Scrapeless proxy second
+        if self.scrapeless_token.is_some() {
+            let http_start = Instant::now();
+            match self.post_via_scrapeless(path, &body, &headers).await {
+                Ok(result) => {
+                    let http_time = http_start.elapsed();
+                    let total_time = total_start.elapsed();
+                    info!("CLOB POST via Scrapeless: json={:?} auth={:?} http={:?} TOTAL={:?}",
+                        json_time, auth_time, http_time, total_time);
+                    info!("Order posted successfully via Scrapeless: {:?}", result);
+                    return Ok(result);
+                }
+                Err(e) => {
+                    warn!("Scrapeless proxy failed: {}, trying fallback...", e);
+                }
+            }
+        }
+
+        // Fallback to Lambda proxy if configured
+        let (url, use_proxy) = if let Some(lambda_url) = &self.config.lambda_proxy_url {
+            (lambda_url.clone(), true)
+        } else {
+            (format!("{}{}", self.config.clob_url, path), false)
+        };
+
         let http_start = Instant::now();
-        let response = request
-            .body(body)
-            .send()
-            .await
-            .context("Failed to post order")?;
+        let response = if use_proxy {
+            // Lambda proxy: wrap request in JSON envelope
+            let proxy_request = json!({
+                "path": path,
+                "method": "POST",
+                "headers": headers.iter().cloned().collect::<std::collections::HashMap<String, String>>(),
+                "body": body
+            });
+            info!("Using Lambda proxy for order submission");
+            self.client
+                .post(&url)
+                .json(&proxy_request)
+                .send()
+                .await
+                .context("Failed to post order via Lambda")?
+        } else {
+            // Direct: add headers individually
+            let mut request = self.client.post(&url);
+            for (key, value) in headers {
+                request = request.header(&key, &value);
+            }
+            request
+                .body(body)
+                .send()
+                .await
+                .context("Failed to post order")?
+        };
         let http_time = http_start.elapsed();
 
         let parse_start = Instant::now();
@@ -132,18 +350,39 @@ impl ClobClient {
 
         let total_time = total_start.elapsed();
 
-        info!("CLOB POST timing: json={:?} auth={:?} http={:?} parse={:?} TOTAL={:?}",
-            json_time, auth_time, http_time, parse_time, total_time);
+        info!("CLOB POST timing: json={:?} auth={:?} http={:?} parse={:?} TOTAL={:?} (proxy={})",
+            json_time, auth_time, http_time, parse_time, total_time, use_proxy);
 
-        if !status.is_success() {
-            anyhow::bail!("Order failed: {} - {:?}", status, result);
+        // Handle Lambda response (unwrap body field if present)
+        let final_result = if use_proxy {
+            if let Some(body_str) = result.get("body").and_then(|b| b.as_str()) {
+                serde_json::from_str(body_str).unwrap_or(result)
+            } else {
+                result
+            }
+        } else {
+            result
+        };
+
+        if !status.is_success() && !use_proxy {
+            anyhow::bail!("Order failed: {} - {:?}", status, final_result);
         }
 
-        info!("Order posted successfully: {:?}", result);
-        Ok(result)
+        // Check Lambda response status
+        if use_proxy {
+            if let Some(status_code) = final_result.get("statusCode").and_then(|s| s.as_u64()) {
+                if status_code >= 400 {
+                    anyhow::bail!("Order failed via Lambda: {:?}", final_result);
+                }
+            }
+        }
+
+        info!("Order posted successfully: {:?}", final_result);
+        Ok(final_result)
     }
 
     /// Post multiple orders in parallel
+    /// Priority: 1) Residential proxy, 2) Scrapeless, 3) Lambda proxy, 4) Direct
     pub async fn post_orders(&self, orders: &[Order]) -> Result<Vec<serde_json::Value>> {
         let total_start = Instant::now();
 
@@ -155,19 +394,82 @@ impl ClobClient {
         let headers = generate_headers(&self.config, "POST", path, &body)?;
         let auth_time = auth_start.elapsed();
 
-        let url = format!("{}{}", self.config.clob_url, path);
-
-        let mut request = self.client.post(&url);
-        for (key, value) in headers {
-            request = request.header(&key, &value);
+        // Try residential proxy first (fastest, most reliable)
+        if self.proxy_client.is_some() {
+            let http_start = Instant::now();
+            match self.post_via_proxy(path, &body, &headers).await {
+                Ok(result) => {
+                    let http_time = http_start.elapsed();
+                    let total_time = total_start.elapsed();
+                    info!("CLOB BATCH POST via residential proxy: {} orders, json={:?} auth={:?} http={:?} TOTAL={:?}",
+                        orders.len(), json_time, auth_time, http_time, total_time);
+                    info!("Orders posted successfully via proxy: {:?}", result);
+                    return match result {
+                        serde_json::Value::Array(arr) => Ok(arr),
+                        _ => Ok(vec![result]),
+                    };
+                }
+                Err(e) => {
+                    warn!("Residential proxy failed for batch: {}, trying Scrapeless...", e);
+                }
+            }
         }
 
+        // Try Scrapeless proxy second
+        if self.scrapeless_token.is_some() {
+            let http_start = Instant::now();
+            match self.post_via_scrapeless(path, &body, &headers).await {
+                Ok(result) => {
+                    let http_time = http_start.elapsed();
+                    let total_time = total_start.elapsed();
+                    info!("CLOB BATCH POST via Scrapeless: {} orders, json={:?} auth={:?} http={:?} TOTAL={:?}",
+                        orders.len(), json_time, auth_time, http_time, total_time);
+                    info!("Orders posted successfully via Scrapeless: {:?}", result);
+                    return match result {
+                        serde_json::Value::Array(arr) => Ok(arr),
+                        _ => Ok(vec![result]),
+                    };
+                }
+                Err(e) => {
+                    warn!("Scrapeless proxy failed for batch orders: {}, trying fallback...", e);
+                }
+            }
+        }
+
+        // Fallback to Lambda proxy if configured
+        let (url, use_proxy) = if let Some(lambda_url) = &self.config.lambda_proxy_url {
+            (lambda_url.clone(), true)
+        } else {
+            (format!("{}{}", self.config.clob_url, path), false)
+        };
+
         let http_start = Instant::now();
-        let response = request
-            .body(body)
-            .send()
-            .await
-            .context("Failed to post orders")?;
+        let response = if use_proxy {
+            // Lambda proxy: wrap request in JSON envelope
+            let proxy_request = json!({
+                "path": path,
+                "method": "POST",
+                "headers": headers.iter().cloned().collect::<std::collections::HashMap<String, String>>(),
+                "body": body
+            });
+            info!("Using Lambda proxy for batch order submission");
+            self.client
+                .post(&url)
+                .json(&proxy_request)
+                .send()
+                .await
+                .context("Failed to post orders via Lambda")?
+        } else {
+            let mut request = self.client.post(&url);
+            for (key, value) in headers {
+                request = request.header(&key, &value);
+            }
+            request
+                .body(body)
+                .send()
+                .await
+                .context("Failed to post orders")?
+        };
         let http_time = http_start.elapsed();
 
         let parse_start = Instant::now();
@@ -177,19 +479,30 @@ impl ClobClient {
 
         let total_time = total_start.elapsed();
 
-        info!("CLOB BATCH POST timing: {} orders, json={:?} auth={:?} http={:?} parse={:?} TOTAL={:?}",
-            orders.len(), json_time, auth_time, http_time, parse_time, total_time);
+        info!("CLOB BATCH POST timing: {} orders, json={:?} auth={:?} http={:?} parse={:?} TOTAL={:?} (proxy={})",
+            orders.len(), json_time, auth_time, http_time, parse_time, total_time, use_proxy);
 
-        if !status.is_success() {
-            anyhow::bail!("Orders failed: {} - {:?}", status, result);
+        // Handle Lambda response
+        let final_result = if use_proxy {
+            if let Some(body_str) = result.get("body").and_then(|b| b.as_str()) {
+                serde_json::from_str(body_str).unwrap_or(result)
+            } else {
+                result
+            }
+        } else {
+            result
+        };
+
+        if !status.is_success() && !use_proxy {
+            anyhow::bail!("Orders failed: {} - {:?}", status, final_result);
         }
 
-        info!("Orders posted successfully: {:?}", result);
+        info!("Orders posted successfully: {:?}", final_result);
 
         // Return as array
-        match result {
+        match final_result {
             serde_json::Value::Array(arr) => Ok(arr),
-            _ => Ok(vec![result]),
+            _ => Ok(vec![final_result]),
         }
     }
 
