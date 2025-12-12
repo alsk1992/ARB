@@ -154,8 +154,9 @@ impl MarketMonitor {
             return Ok(None);
         }
 
-        // Parse end time from slug (btc-updown-15m-{timestamp})
-        let end_time = if let Some(ts_str) = event.slug.strip_prefix("btc-updown-15m-") {
+        // Parse end time from slug ({asset}-updown-15m-{timestamp})
+        let slug_prefix = format!("{}-updown-15m-", self.config.market_asset);
+        let end_time = if let Some(ts_str) = event.slug.strip_prefix(&slug_prefix) {
             if let Ok(ts) = ts_str.parse::<i64>() {
                 // Add 15 minutes to get end time
                 Utc.timestamp_opt(ts + 900, 0).single().unwrap_or(Utc::now())
