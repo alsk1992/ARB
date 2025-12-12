@@ -3,7 +3,8 @@ use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::json;
 use std::collections::HashMap;
-use tracing::{debug, info};
+use std::time::Instant;
+use tracing::{debug, info, trace};
 
 use crate::auth::generate_headers;
 use crate::config::Config;
@@ -16,9 +17,13 @@ pub struct ClobClient {
 
 impl ClobClient {
     pub fn new(config: Config) -> Result<Self> {
+        // Optimized HTTP client for low latency
         let client = Client::builder()
-            .tcp_nodelay(true)
-            .pool_max_idle_per_host(10)
+            .tcp_nodelay(true)                     // Disable Nagle's algorithm
+            .pool_max_idle_per_host(10)            // Keep connections warm
+            .pool_idle_timeout(std::time::Duration::from_secs(90)) // Keep alive longer
+            .timeout(std::time::Duration::from_secs(10))  // Overall timeout
+            .connect_timeout(std::time::Duration::from_secs(5)) // Fast connect timeout
             .build()?;
 
         Ok(Self { client, config })
@@ -26,19 +31,28 @@ impl ClobClient {
 
     /// Get orderbook for a token
     pub async fn get_orderbook(&self, token_id: &str) -> Result<Orderbook> {
+        let start = Instant::now();
+
         let path = format!("/book?token_id={}", token_id);
         let url = format!("{}{}", self.config.clob_url, path);
 
+        let http_start = Instant::now();
         let response = self.client
             .get(&url)
             .send()
             .await
             .context("Failed to fetch orderbook")?;
+        let http_time = http_start.elapsed();
 
+        let parse_start = Instant::now();
         let orderbook: Orderbook = response
             .json()
             .await
             .context("Failed to parse orderbook")?;
+        let parse_time = parse_start.elapsed();
+
+        trace!("Orderbook fetch: http={:?} parse={:?} TOTAL={:?}",
+            http_time, parse_time, start.elapsed());
 
         Ok(orderbook)
     }
@@ -86,10 +100,15 @@ impl ClobClient {
 
     /// Post a signed order to CLOB
     pub async fn post_order(&self, order: &Order) -> Result<serde_json::Value> {
+        let total_start = Instant::now();
+
         let path = "/order";
         let body = serde_json::to_string(order)?;
+        let json_time = total_start.elapsed();
 
+        let auth_start = Instant::now();
         let headers = generate_headers(&self.config, "POST", path, &body)?;
+        let auth_time = auth_start.elapsed();
 
         let url = format!("{}{}", self.config.clob_url, path);
 
@@ -98,14 +117,23 @@ impl ClobClient {
             request = request.header(&key, &value);
         }
 
+        let http_start = Instant::now();
         let response = request
             .body(body)
             .send()
             .await
             .context("Failed to post order")?;
+        let http_time = http_start.elapsed();
 
+        let parse_start = Instant::now();
         let status = response.status();
         let result: serde_json::Value = response.json().await?;
+        let parse_time = parse_start.elapsed();
+
+        let total_time = total_start.elapsed();
+
+        info!("CLOB POST timing: json={:?} auth={:?} http={:?} parse={:?} TOTAL={:?}",
+            json_time, auth_time, http_time, parse_time, total_time);
 
         if !status.is_success() {
             anyhow::bail!("Order failed: {} - {:?}", status, result);
@@ -117,10 +145,15 @@ impl ClobClient {
 
     /// Post multiple orders in parallel
     pub async fn post_orders(&self, orders: &[Order]) -> Result<Vec<serde_json::Value>> {
+        let total_start = Instant::now();
+
         let path = "/orders";
         let body = serde_json::to_string(orders)?;
+        let json_time = total_start.elapsed();
 
+        let auth_start = Instant::now();
         let headers = generate_headers(&self.config, "POST", path, &body)?;
+        let auth_time = auth_start.elapsed();
 
         let url = format!("{}{}", self.config.clob_url, path);
 
@@ -129,14 +162,23 @@ impl ClobClient {
             request = request.header(&key, &value);
         }
 
+        let http_start = Instant::now();
         let response = request
             .body(body)
             .send()
             .await
             .context("Failed to post orders")?;
+        let http_time = http_start.elapsed();
 
+        let parse_start = Instant::now();
         let status = response.status();
         let result: serde_json::Value = response.json().await?;
+        let parse_time = parse_start.elapsed();
+
+        let total_time = total_start.elapsed();
+
+        info!("CLOB BATCH POST timing: {} orders, json={:?} auth={:?} http={:?} parse={:?} TOTAL={:?}",
+            orders.len(), json_time, auth_time, http_time, parse_time, total_time);
 
         if !status.is_success() {
             anyhow::bail!("Orders failed: {} - {:?}", status, result);

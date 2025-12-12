@@ -1,17 +1,16 @@
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
-use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::config::Config;
 use crate::orderbook::OrderbookManager;
-use crate::types::{PriceLevel, TradeFill, Side};
+use crate::types::{TradeFill, Side};
 
 /// WebSocket event types
 #[derive(Debug, Clone)]

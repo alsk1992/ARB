@@ -7,6 +7,7 @@ mod market;
 mod ml_client;
 mod orderbook;
 mod position;
+mod presigned_cache;
 mod retry;
 mod signer;
 mod strategy;
@@ -81,7 +82,8 @@ async fn main() -> Result<()> {
     // Initialize components
     let clob = ClobClient::new(config.clone())?;
     let signer = OrderSigner::new(&config.private_key, &config.address)?;
-    let strategy = LadderStrategy::new(config.clone(), clob, signer);
+    let strategy = LadderStrategy::new(config.clone(), clob, signer)
+        .with_ml_client(ml_client.clone());  // Wire up ML client!
     let market_monitor = MarketMonitor::new(config.clone());
     let position_manager = Arc::new(Mutex::new(PositionManager::new()));
     let orderbook_manager = Arc::new(OrderbookManager::new());
@@ -99,6 +101,7 @@ async fn main() -> Result<()> {
         orderbook_manager,
         alerts,
         data_logger,
+        ml_client,
     ).await
 }
 
@@ -127,6 +130,7 @@ async fn run_trading_loop(
     orderbook_manager: Arc<OrderbookManager>,
     alerts: Arc<AlertClient>,
     data_logger: Arc<DataLogger>,
+    ml_client: Arc<MlClient>,
 ) -> Result<()> {
     loop {
         info!("═══════════════════════════════════════");
@@ -159,6 +163,7 @@ async fn run_trading_loop(
             orderbook_manager.clone(),
             alerts.clone(),
             data_logger.clone(),
+            ml_client.clone(),
             market_ws_rx,
         ).await {
             error!("Market session error: {}", e);
@@ -179,6 +184,7 @@ async fn run_market_session(
     orderbook_manager: Arc<OrderbookManager>,
     alerts: Arc<AlertClient>,
     data_logger: Arc<DataLogger>,
+    ml_client: Arc<MlClient>,
     mut ws_rx: tokio::sync::mpsc::Receiver<WsEvent>,
 ) -> Result<()> {
     let session_start = chrono::Utc::now();
@@ -219,26 +225,67 @@ async fn run_market_session(
     }
 
     // Check spread before entering
-    if let Some(spread) = orderbook_manager.get_combined_spread(&market.up_token_id, &market.down_token_id) {
-        info!("Current spread: {}% (UP ask: {}, DOWN ask: {})",
-            spread.spread_pct, spread.up_best_ask, spread.down_best_ask);
-
-        if !spread.meets_threshold(config.min_spread_percent) {
-            warn!("Spread {}% below minimum {}%, skipping market",
-                spread.spread_pct, config.min_spread_percent);
-            alerts.warning(&format!("Skipping market - spread too tight: {}%", spread.spread_pct)).await;
+    let spread = match orderbook_manager.get_combined_spread(&market.up_token_id, &market.down_token_id) {
+        Some(s) => s,
+        None => {
+            warn!("No spread data available, skipping market");
             return Ok(());
         }
+    };
+
+    info!("Current spread: {}% (UP ask: {}, DOWN ask: {})",
+        spread.spread_pct, spread.up_best_ask, spread.down_best_ask);
+
+    if !spread.meets_threshold(config.min_spread_percent) {
+        warn!("Spread {}% below minimum {}%, skipping market",
+            spread.spread_pct, config.min_spread_percent);
+        alerts.warning(&format!("Skipping market - spread too tight: {}%", spread.spread_pct)).await;
+        return Ok(());
     }
 
-    // Submit ladder orders
-    info!("Submitting ladder orders...");
-    let (up_order_ids, down_order_ids) = match strategy.submit_ladder(market).await {
-        Ok(ids) => ids,
-        Err(e) => {
-            error!("Failed to submit orders: {}", e);
-            alerts.error("Order submission failed", &e.to_string()).await;
-            return Err(e);
+    // ML Entry Decision - check if we should enter NOW or wait
+    let seconds_to_resolution = (market.end_time - chrono::Utc::now()).num_seconds();
+    let spread_history: Vec<rust_decimal::Decimal> = vec![spread.spread_pct]; // TODO: track history
+
+    let should_enter = ml_client.should_enter_now(
+        spread.spread_pct,
+        seconds_to_resolution,
+        &spread_history,
+    ).await;
+
+    if !should_enter {
+        info!("ML recommends waiting for better entry (spread may improve)");
+        // Don't return - continue to monitoring loop to catch better opportunities
+    }
+
+    // Submit ladder orders - try FAST PATH first (cached orderbooks)
+    let (up_order_ids, down_order_ids) = match orderbook_manager.get_orderbooks(
+        &market.up_token_id,
+        &market.down_token_id,
+    ) {
+        Some((up_book, down_book)) if !up_book.asks.is_empty() => {
+            // FAST PATH - use cached orderbooks (saves 100-200ms)
+            info!("Submitting ladder orders (FAST PATH - cached orderbooks)...");
+            match strategy.submit_ladder_with_cache(market, &up_book, &down_book).await {
+                Ok(ids) => ids,
+                Err(e) => {
+                    error!("Failed to submit orders: {}", e);
+                    alerts.error("Order submission failed", &e.to_string()).await;
+                    return Err(e);
+                }
+            }
+        }
+        _ => {
+            // SLOW PATH - fetch orderbooks via REST
+            warn!("No cached orderbooks, falling back to REST fetch");
+            match strategy.submit_ladder(market).await {
+                Ok(ids) => ids,
+                Err(e) => {
+                    error!("Failed to submit orders: {}", e);
+                    alerts.error("Order submission failed", &e.to_string()).await;
+                    return Err(e);
+                }
+            }
         }
     };
 

@@ -2,8 +2,6 @@ use parking_lot::RwLock;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use std::collections::BTreeMap;
-use std::sync::Arc;
-use tracing::debug;
 
 /// Local orderbook mirror for fast access
 #[derive(Debug, Clone)]
@@ -186,6 +184,58 @@ impl OrderbookManager {
             down_bids: down_book.top_bids(levels),
         })
     }
+
+    /// Get orderbooks in API format (for strategy compatibility)
+    /// Returns (up_orderbook, down_orderbook) converted to Orderbook type
+    pub fn get_orderbooks(
+        &self,
+        up_token: &str,
+        down_token: &str,
+    ) -> Option<(crate::types::Orderbook, crate::types::Orderbook)> {
+        let books = self.books.read();
+
+        let up_book = books.get(up_token)?;
+        let down_book = books.get(down_token)?;
+
+        // Convert LocalOrderbook to Orderbook format
+        let up_orderbook = local_to_orderbook(up_book);
+        let down_orderbook = local_to_orderbook(down_book);
+
+        Some((up_orderbook, down_orderbook))
+    }
+}
+
+/// Convert LocalOrderbook to API Orderbook format
+fn local_to_orderbook(local: &LocalOrderbook) -> crate::types::Orderbook {
+    use crate::types::PriceLevel;
+
+    let bids: Vec<PriceLevel> = local.bids
+        .iter()
+        .rev() // Highest first for bids
+        .map(|(price, size)| PriceLevel {
+            price: price.to_string(),
+            size: size.to_string(),
+        })
+        .collect();
+
+    let asks: Vec<PriceLevel> = local.asks
+        .iter()
+        .map(|(price, size)| PriceLevel {
+            price: price.to_string(),
+            size: size.to_string(),
+        })
+        .collect();
+
+    crate::types::Orderbook {
+        market: String::new(),
+        asset_id: local.asset_id.clone(),
+        bids,
+        asks,
+        hash: String::new(),
+        timestamp: None,
+        min_order_size: None,
+        tick_size: None,
+    }
 }
 
 /// Orderbook depth for both UP and DOWN tokens
@@ -195,6 +245,58 @@ pub struct OrderbookDepth {
     pub up_bids: Vec<(Decimal, Decimal)>,
     pub down_asks: Vec<(Decimal, Decimal)>,
     pub down_bids: Vec<(Decimal, Decimal)>,
+}
+
+impl OrderbookDepth {
+    /// Calculate liquidity imbalance for UP token
+    /// Returns positive if more bid pressure (bullish), negative if more ask pressure (bearish)
+    pub fn up_imbalance(&self) -> Decimal {
+        let bid_vol: Decimal = self.up_bids.iter().map(|(_, s)| *s).sum();
+        let ask_vol: Decimal = self.up_asks.iter().map(|(_, s)| *s).sum();
+        let total = bid_vol + ask_vol;
+        if total == Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        (bid_vol - ask_vol) / total
+    }
+
+    /// Calculate liquidity imbalance for DOWN token
+    pub fn down_imbalance(&self) -> Decimal {
+        let bid_vol: Decimal = self.down_bids.iter().map(|(_, s)| *s).sum();
+        let ask_vol: Decimal = self.down_asks.iter().map(|(_, s)| *s).sum();
+        let total = bid_vol + ask_vol;
+        if total == Decimal::ZERO {
+            return Decimal::ZERO;
+        }
+        (bid_vol - ask_vol) / total
+    }
+
+    /// Get predicted direction based on orderbook imbalance
+    /// More UP bid pressure + more DOWN ask pressure = UP likely
+    /// More DOWN bid pressure + more UP ask pressure = DOWN likely
+    pub fn predicted_direction(&self) -> Option<bool> {
+        let up_imb = self.up_imbalance();
+        let down_imb = self.down_imbalance();
+
+        // Significant imbalance threshold (e.g., 20%)
+        let threshold = dec!(0.2);
+
+        if up_imb > threshold && down_imb < -threshold {
+            Some(true)  // UP predicted
+        } else if down_imb > threshold && up_imb < -threshold {
+            Some(false) // DOWN predicted
+        } else {
+            None // No clear signal
+        }
+    }
+
+    /// Get orderbook confidence (0-100) based on imbalance strength
+    pub fn confidence(&self) -> Decimal {
+        let up_imb = self.up_imbalance().abs();
+        let down_imb = self.down_imbalance().abs();
+        let combined = (up_imb + down_imb) * dec!(100);
+        combined.min(dec!(100))
+    }
 }
 
 #[derive(Debug, Clone)]

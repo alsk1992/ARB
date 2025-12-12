@@ -17,6 +17,18 @@ path = "src/main.rs"
 name = "test_signing"
 path = "src/bin/test_signing.rs"
 
+[[bin]]
+name = "directional_bot"
+path = "src/bin/directional_bot.rs"
+
+[[bin]]
+name = "latency_bench"
+path = "src/bin/latency_bench.rs"
+
+[[bin]]
+name = "timing_bot"
+path = "src/bin/timing_bot.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1.35", features = ["full"] }
@@ -73,8 +85,14 @@ prometheus = "0.13"
 # Parking lot for faster mutexes
 parking_lot = "0.12"
 
+# SQLite for trade logging
+rusqlite = { version = "0.31", features = ["bundled"] }
+
 # Async trait for strategy trait
 async-trait = "0.1"
+
+# Thread-safe concurrent hashmap for pre-signed order cache
+dashmap = "5.5"
 
 [profile.release]
 opt-level = 3

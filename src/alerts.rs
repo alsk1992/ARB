@@ -2,84 +2,120 @@ use anyhow::Result;
 use reqwest::Client;
 use rust_decimal::Decimal;
 use serde_json::json;
-use tracing::{error, info};
+use tracing::{info, warn};
 
-/// Discord webhook client for alerts
+/// Alert client supporting Discord and Telegram
 pub struct AlertClient {
     client: Client,
-    webhook_url: Option<String>,
+    discord_url: Option<String>,
+    telegram_token: Option<String>,
+    telegram_chat_id: Option<String>,
     enabled: bool,
 }
 
 impl AlertClient {
     pub fn new(webhook_url: Option<String>) -> Self {
-        let enabled = webhook_url.is_some();
+        // Check for Telegram config in env
+        let telegram_token = std::env::var("TELEGRAM_BOT_TOKEN").ok();
+        let telegram_chat_id = std::env::var("TELEGRAM_CHAT_ID").ok();
+
+        let has_discord = webhook_url.is_some() && !webhook_url.as_ref().unwrap().is_empty();
+        let has_telegram = telegram_token.is_some() && telegram_chat_id.is_some();
+        let enabled = has_discord || has_telegram;
+
+        if has_telegram {
+            info!("Telegram alerts enabled");
+        }
+        if has_discord {
+            info!("Discord alerts enabled");
+        }
+
         Self {
             client: Client::new(),
-            webhook_url,
+            discord_url: webhook_url,
+            telegram_token,
+            telegram_chat_id,
             enabled,
         }
     }
 
-    /// Send a Discord message
-    async fn send(&self, content: &str, color: u32) -> Result<()> {
+    /// Send alert to all configured channels
+    async fn send(&self, content: &str, _color: u32) -> Result<()> {
         if !self.enabled {
             return Ok(());
         }
 
-        let url = match &self.webhook_url {
-            Some(u) => u,
-            None => return Ok(()),
-        };
+        // Try Telegram first (more reliable)
+        if let (Some(token), Some(chat_id)) = (&self.telegram_token, &self.telegram_chat_id) {
+            let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
+            let payload = json!({
+                "chat_id": chat_id,
+                "text": content,
+                "parse_mode": "HTML"
+            });
 
-        let payload = json!({
-            "embeds": [{
-                "description": content,
-                "color": color
-            }]
-        });
-
-        match self.client.post(url).json(&payload).send().await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                error!("Failed to send Discord alert: {}", e);
-                Ok(()) // Don't fail the bot over alerts
+            match self.client.post(&url).json(&payload).send().await {
+                Ok(resp) => {
+                    if !resp.status().is_success() {
+                        warn!("Telegram alert failed: {}", resp.status());
+                    }
+                }
+                Err(e) => {
+                    warn!("Telegram alert error: {}", e);
+                }
             }
         }
+
+        // Also try Discord if configured
+        if let Some(url) = &self.discord_url {
+            if !url.is_empty() {
+                let payload = json!({
+                    "embeds": [{
+                        "description": content,
+                        "color": _color
+                    }]
+                });
+
+                if let Err(e) = self.client.post(url).json(&payload).send().await {
+                    warn!("Discord alert error: {}", e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Alert: Bot started
     pub async fn bot_started(&self, dry_run: bool) {
-        let mode = if dry_run { "DRY RUN" } else { "LIVE" };
-        let msg = format!("🤖 **BTC Arb Bot Started**\nMode: {}", mode);
-        let _ = self.send(&msg, 0x00FF00).await; // Green
+        let mode = if dry_run { "🔵 DRY RUN" } else { "🟢 LIVE" };
+        let msg = format!("🤖 <b>BTC 15m Bot Started</b>\n{}", mode);
+        let _ = self.send(&msg, 0x00FF00).await;
     }
 
     /// Alert: New market found
-    pub async fn market_found(&self, title: &str, end_time: &str) {
-        let msg = format!(
-            "📊 **New Market Found**\n{}\nEnds: {}",
-            title, end_time
-        );
-        let _ = self.send(&msg, 0x0099FF).await; // Blue
+    pub async fn market_found(&self, title: &str, _end_time: &str) {
+        // Extract time from title (e.g., "11:30PM-11:45PM ET")
+        let time_part = title.split(" - ").last().unwrap_or("");
+        let msg = format!("📊 <b>Market</b>: {}", time_part);
+        let _ = self.send(&msg, 0x0099FF).await;
     }
 
     /// Alert: Orders submitted
-    pub async fn orders_submitted(&self, up_count: usize, down_count: usize, total_usd: Decimal) {
+    pub async fn orders_submitted(&self, _up_count: usize, _down_count: usize, total_usd: Decimal) {
         let msg = format!(
-            "📝 **Orders Submitted**\nUP: {} orders\nDOWN: {} orders\nTotal: ${}",
-            up_count, down_count, total_usd
+            "📝 <b>Order</b>: ${:.0}",
+            total_usd
         );
-        let _ = self.send(&msg, 0x0099FF).await; // Blue
+        let _ = self.send(&msg, 0x0099FF).await;
     }
 
     /// Alert: Fill received
-    pub async fn fill_received(&self, side: &str, shares: &str, price: &str) {
+    pub async fn fill_received(&self, side: &str, _shares: &str, price: &str) {
         let msg = format!(
-            "✅ **Fill Received**\n{}: {} shares @ ${}",
-            side, shares, price
+            "✅ <b>Fill</b>: {} @ {}¢",
+            side, (price.parse::<f64>().unwrap_or(0.0) * 100.0) as i32
         );
-        let _ = self.send(&msg, 0x00FF00).await; // Green
+        let _ = self.send(&msg, 0x00FF00).await;
     }
 
     /// Alert: Position update
@@ -97,12 +133,18 @@ impl AlertClient {
     }
 
     /// Alert: Market resolved
-    pub async fn market_resolved(&self, title: &str, profit: Decimal) {
-        let emoji = if profit > Decimal::ZERO { "🎉" } else { "😢" };
+    pub async fn market_resolved(&self, _title: &str, profit: Decimal) {
+        let (emoji, result) = if profit > Decimal::ZERO {
+            ("🟢", "WIN")
+        } else if profit < Decimal::ZERO {
+            ("🔴", "LOSS")
+        } else {
+            ("⚪", "FLAT")
+        };
         let color = if profit > Decimal::ZERO { 0x00FF00 } else { 0xFF0000 };
         let msg = format!(
-            "{} **Market Resolved**\n{}\nP&L: ${}",
-            emoji, title, profit
+            "{} <b>{}</b>: ${:.2}",
+            emoji, result, profit
         );
         let _ = self.send(&msg, color).await;
     }

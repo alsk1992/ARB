@@ -8,6 +8,7 @@ pub mod scalper;
 pub mod market_maker;
 pub mod momentum;
 pub mod hybrid;
+pub mod directional;
 
 use async_trait::async_trait;
 use rust_decimal::Decimal;

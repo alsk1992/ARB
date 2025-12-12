@@ -7,6 +7,7 @@
 
 pub mod alerts;
 pub mod auth;
+pub mod btc_price;
 pub mod clob;
 pub mod config;
 pub mod datalog;
@@ -15,9 +16,11 @@ pub mod ml_client;
 pub mod multi_strategy;
 pub mod orderbook;
 pub mod position;
+pub mod presigned_cache;
 pub mod retry;
 pub mod signer;
 pub mod strategies;
 pub mod strategy;
+pub mod trade_db;
 pub mod types;
 pub mod websocket;
