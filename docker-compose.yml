@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: orderflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: orderflow
+      POSTGRES_USER: orderflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orderflow"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  listener:
+    build:
+      context: ./orderflow-listener
+      dockerfile: Dockerfile
+    container_name: orderflow-listener
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://orderflow:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/orderflow
+      POLYGON_RPC_URL: ${POLYGON_RPC_URL}
+      RUST_LOG: info,orderflow_listener=debug
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  reputation:
+    build:
+      context: ./orderflow-reputation
+      dockerfile: Dockerfile
+    container_name: orderflow-reputation
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://orderflow:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/orderflow
+      CALCULATION_INTERVAL_SECONDS: ${CALCULATION_INTERVAL_SECONDS:-3600}
+      RUST_LOG: info,orderflow_reputation=debug
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  executor:
+    build:
+      context: ./orderflow-executor
+      dockerfile: Dockerfile
+    container_name: orderflow-executor
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://orderflow:${POSTGRES_PASSWORD:-changeme123}@postgres:5432/orderflow
+      MAX_POSITION_USD: ${MAX_POSITION_USD:-1000}
+      MIN_SIGNAL_CONFIDENCE: ${MIN_SIGNAL_CONFIDENCE:-0.7}
+      MAX_DAILY_LOSS: ${MAX_DAILY_LOSS:-500}
+      MAX_OPEN_POSITIONS: ${MAX_OPEN_POSITIONS:-5}
+      MIN_WHALE_SCORE: ${MIN_WHALE_SCORE:-7.0}
+      MAX_FADE_SCORE: ${MAX_FADE_SCORE:-3.0}
+      ENABLE_PAPER_TRADING: ${ENABLE_PAPER_TRADING:-true}
+      ENABLE_WHALE_FOLLOWING: ${ENABLE_WHALE_FOLLOWING:-true}
+      ENABLE_DEGEN_FADING: ${ENABLE_DEGEN_FADING:-false}
+      KELLY_FRACTION: ${KELLY_FRACTION:-0.25}
+      RUST_LOG: info,orderflow_executor=debug
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  postgres_data:
