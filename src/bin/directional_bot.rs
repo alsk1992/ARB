@@ -268,6 +268,7 @@ async fn main() -> Result<()> {
     info!("  Max entry price: ${}", strategy_config.max_entry_price);
     info!("  Position size: ${}", strategy_config.position_size);
     info!("  Laddering: {} levels @ {}¢ spacing", strategy_config.ladder_levels, strategy_config.ladder_spacing * dec!(100));
+    info!("  DCA: 3 entries (min 5-6, 8-9, 11-12) @ 33%/33%/34%");
 
     // Initialize components
     let market_monitor = MarketMonitor::new(config.clone());
@@ -404,6 +405,17 @@ async fn run_directional_session(
     let mut minute_of_entry = 0.0;
     let mut skip_reason: Option<String> = None; // Track why we didn't enter
 
+    // DCA: Track entry count and windows
+    // Entry 1: minute 5-6 (33% of position)
+    // Entry 2: minute 8-9 (33% of position) - only if signal still valid
+    // Entry 3: minute 11-12 (34% of position) - only if signal still valid
+    let mut entry_count = 0u32;
+    const DCA_WINDOWS: [(f64, f64, Decimal); 3] = [
+        (5.0, 6.5, dec!(0.33)),   // Entry 1: minute 5-6.5, 33%
+        (8.0, 9.5, dec!(0.33)),   // Entry 2: minute 8-9.5, 33%
+        (11.0, 12.5, dec!(0.34)), // Entry 3: minute 11-12.5, 34%
+    ];
+
     // PRO TRADER: Track reversals and trend consistency
     let mut reversal_tracker = ReversalTracker::new();
 
@@ -469,11 +481,15 @@ async fn run_directional_session(
                     debug!("Direction reversal detected! Count: {}", reversal_tracker.reversal_count);
                 }
 
-                // Check if we should enter
-                if !has_entered
-                    && minute_of_period >= strategy_config.entry_minute_min
-                    && minute_of_period <= strategy_config.entry_minute_max
-                {
+                // DCA: Check if we're in an entry window
+                let current_dca_window = DCA_WINDOWS.iter()
+                    .enumerate()
+                    .find(|(idx, (start, end, _))| {
+                        *idx >= entry_count as usize && minute_of_period >= *start && minute_of_period <= *end
+                    });
+
+                // Check if we should enter (DCA logic)
+                if let Some((_window_idx, (_, _, pct))) = current_dca_window {
                     // PRO TRADER: Skip choppy markets (2+ reversals)
                     if reversal_tracker.is_choppy() {
                         skip_reason = Some(format!("Choppy market ({} reversals)", reversal_tracker.reversal_count));
@@ -481,12 +497,28 @@ async fn run_directional_session(
                         continue;
                     }
 
-                    // PRO TRADER: Require trend consistency (3+ same direction)
-                    if !reversal_tracker.is_trend_consistent() {
-                        skip_reason = Some(format!("Trend not consistent ({}/3)", reversal_tracker.consecutive_same));
-                        info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
-                        continue;
+                    // For DCA entries 2 & 3: Check if direction still matches first entry
+                    if entry_count > 0 {
+                        if let Some(first_direction) = predicted_outcome {
+                            let current_direction = btc_is_up.unwrap_or(false);
+                            if current_direction != first_direction {
+                                info!("⏭️ DCA SKIP: Direction reversed (was {}, now {})",
+                                    if first_direction { "UP" } else { "DOWN" },
+                                    if current_direction { "UP" } else { "DOWN" });
+                                continue;
+                            }
+                        }
+                    } else {
+                        // First entry: Require trend consistency
+                        if !reversal_tracker.is_trend_consistent() {
+                            skip_reason = Some(format!("Trend not consistent ({}/3)", reversal_tracker.consecutive_same));
+                            info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
+                            continue;
+                        }
                     }
+
+                    // DCA position sizing
+                    let dca_pct = *pct;
 
                     // Get orderbook prices
                     if let Some(spread) = orderbook_manager.get_combined_spread(
@@ -521,16 +553,19 @@ async fn run_directional_session(
                             }
 
                             // CONFIDENCE-BASED POSITION SIZING (% of account balance)
-                            let (position_size, confidence_level, risk_pct) = confidence_position_sizing(
+                            let (full_position_size, confidence_level, risk_pct) = confidence_position_sizing(
                                 pct,
                                 config.account_balance,
                             );
 
-                            if position_size == Decimal::ZERO {
+                            if full_position_size == Decimal::ZERO {
                                 skip_reason = Some(format!("Confidence too low ({:.4}%)", pct.abs()));
                                 info!("⏭️ SKIP: {}", skip_reason.as_ref().unwrap());
                                 continue;
                             }
+
+                            // DCA: Apply percentage for this entry window
+                            let position_size = full_position_size * dca_pct;
 
                             // Check confidence threshold
                             if pct.abs() >= strategy_config.min_confidence_pct {
@@ -543,15 +578,16 @@ async fn run_directional_session(
                                 // Check price is acceptable
                                 if best_ask <= strategy_config.max_entry_price {
                                     info!("╔═══════════════════════════════════════════════════╗");
-                                    info!("║          ENTRY SIGNAL DETECTED!                   ║");
+                                    info!("║      DCA ENTRY {} of 3 DETECTED!                   ║", entry_count + 1);
                                     info!("╚═══════════════════════════════════════════════════╝");
                                     info!("  BTC: ${} ({:+.4}% from open)", btc_price.round_dp(2), pct);
                                     info!("  Direction: {}", outcome);
                                     info!("  Best ask: ${}", best_ask);
                                     info!("  Minute: {:.1}", minute_of_period);
+                                    info!("  DCA: Entry {}/3 ({}%)", entry_count + 1, (dca_pct * dec!(100)).round_dp(0));
                                     info!("  Confidence: {} | Momentum: {:.1}", confidence_level, momentum_conf);
                                     info!("  Momentum aligned: {}", momentum_aligned);
-                                    info!("  Account: ${} | Risk: {}% | Entry: ${}", config.account_balance, risk_pct, position_size.round_dp(2));
+                                    info!("  Account: ${} | Risk: {}% | DCA Entry: ${}", config.account_balance, risk_pct, position_size.round_dp(2));
                                     if let Some(vol) = volatility {
                                         info!("  Volatility: {:.4}%", vol);
                                     }
@@ -607,19 +643,37 @@ async fn run_directional_session(
                                         }
                                     }
 
-                                    // Set entry state
+                                    // Set entry state (DCA accumulates)
                                     if total_shares > Decimal::ZERO {
-                                        entry_price = avg_price / Decimal::from(levels);
-                                        has_entered = true;
-                                        position_shares = total_shares;
-                                        position_cost = total_cost;
-                                        predicted_outcome = Some(is_up);
+                                        let this_entry_price = avg_price / Decimal::from(levels);
 
-                                        info!("✅ ENTRY: {} {} shares, avg {}¢, total ${:.2}",
-                                            total_shares.round_dp(0), outcome, (entry_price * dec!(100)).round_dp(1), total_cost);
+                                        // Accumulate position across DCA entries
+                                        position_shares += total_shares;
+                                        position_cost += total_cost;
+
+                                        // Calculate weighted average entry price
+                                        entry_price = if entry_count == 0 {
+                                            this_entry_price
+                                        } else {
+                                            position_cost / position_shares
+                                        };
+
+                                        // First entry sets direction, subsequent entries confirm
+                                        if entry_count == 0 {
+                                            predicted_outcome = Some(is_up);
+                                        }
+
+                                        // Increment DCA counter
+                                        entry_count += 1;
+                                        has_entered = true;
+
+                                        info!("✅ DCA {}/3: +{} {} shares @ avg {}¢ (total: {} shares, ${:.2})",
+                                            entry_count, total_shares.round_dp(0), outcome,
+                                            (this_entry_price * dec!(100)).round_dp(1),
+                                            position_shares.round_dp(0), position_cost);
 
                                         // Send Telegram alert for entry
-                                        alerts.market_entry(&market_time, outcome, entry_price, total_shares, pct).await;
+                                        alerts.market_entry(&market_time, outcome, this_entry_price, total_shares, pct).await;
 
                                         // Log to database
                                         if let Some(ref db) = trade_db {
