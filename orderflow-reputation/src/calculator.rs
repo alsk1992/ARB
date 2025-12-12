@@ -28,8 +28,8 @@ impl ReputationCalculator {
 
         let mut updated_count = 0;
 
-        for wallet in wallets {
-            match self.calculate_wallet_reputation(&wallet).await {
+        for wallet in &wallets {
+            match self.calculate_wallet_reputation(wallet).await {
                 Ok(_) => {
                     updated_count += 1;
                     if updated_count % 100 == 0 {
