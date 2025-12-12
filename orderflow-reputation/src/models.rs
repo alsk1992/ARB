@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,28 +7,28 @@ pub struct WalletStats {
     pub first_trade_at: Option<DateTime<Utc>>,
     pub last_trade_at: Option<DateTime<Utc>>,
     pub total_trades: i32,
-    pub total_volume_usd: Decimal,
+    pub total_volume_usd: f64,
 
     // Performance metrics
     pub winning_trades: i32,
     pub losing_trades: i32,
-    pub win_rate: Option<Decimal>,
-    pub total_pnl_usd: Decimal,
-    pub avg_profit_per_trade_pct: Option<Decimal>,
+    pub win_rate: Option<f64>,
+    pub total_pnl_usd: f64,
+    pub avg_profit_per_trade_pct: Option<f64>,
 
     // Behavioral patterns
-    pub avg_position_size_usd: Option<Decimal>,
-    pub avg_entry_minute: Option<Decimal>,
-    pub avg_hold_duration_minutes: Option<Decimal>,
+    pub avg_position_size_usd: Option<f64>,
+    pub avg_entry_minute: Option<f64>,
+    pub avg_hold_duration_minutes: Option<f64>,
 
     // Risk metrics
-    pub sharpe_ratio: Option<Decimal>,
-    pub max_drawdown_pct: Option<Decimal>,
-    pub volatility: Option<Decimal>,
+    pub sharpe_ratio: Option<f64>,
+    pub max_drawdown_pct: Option<f64>,
+    pub volatility: Option<f64>,
 
     // Reputation
-    pub reputation_score: Decimal,
-    pub confidence_level: Decimal,
+    pub reputation_score: f64,
+    pub confidence_level: f64,
     pub trader_tier: String,
 }
 
