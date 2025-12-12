@@ -332,7 +332,7 @@ impl ReputationCalculator {
                     AND t2.side = 'SELL'
                     AND t2.timestamp > t1.timestamp
             )
-            SELECT AVG(profit_pct) as avg_profit_pct
+            SELECT AVG(profit_pct)::float8 as avg_profit_pct
             FROM position_pairs
             "#
         )
