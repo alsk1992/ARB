@@ -89,20 +89,20 @@ impl PolygonListener {
     }
 
     async fn process_order_filled(&self, event: OrderFilledFilter) -> Result<()> {
-        // Generate unique ID from event data (order_hash + maker + taker)
-        let unique_id = format!(
+        // Generate base ID from event data
+        let base_id = format!(
             "{}_{:?}_{:?}",
             hex::encode(&event.order_hash),
             event.maker,
             event.taker
         );
-        let tx_hash = format!("0x{}", &unique_id[..64].chars().take(64).collect::<String>());
         let block_number = 0u64;  // Will be filled from actual block data later
         let timestamp = chrono::Utc::now();
 
-        // Create maker trade
+        // Create maker trade with unique tx_hash (includes maker address)
+        let maker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.maker);
         let mut maker_trade = Trade::new(
-            tx_hash.clone(),
+            maker_tx_hash,
             block_number,
             timestamp,
             format!("{:?}", event.maker),
@@ -120,9 +120,10 @@ impl PolygonListener {
                 / event.maker_amount_filled.as_u128() as f64;
         }
 
-        // Create taker trade
+        // Create taker trade with unique tx_hash (includes taker address)
+        let taker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.taker);
         let mut taker_trade = Trade::new(
-            tx_hash.clone(),
+            taker_tx_hash,
             block_number,
             timestamp,
             format!("{:?}", event.taker),
@@ -150,20 +151,20 @@ impl PolygonListener {
     }
 
     async fn process_orders_matched(&self, event: OrdersMatchedFilter) -> Result<()> {
-        // Generate unique ID from event data
-        let unique_id = format!(
+        // Generate base ID from event data
+        let base_id = format!(
             "{}_{}_{}",
             hex::encode(&event.maker_order_hash),
             hex::encode(&event.taker_order_hash),
             format!("{:?}{:?}", event.maker, event.taker)
         );
-        let tx_hash = format!("0x{}", &unique_id[..64].chars().take(64).collect::<String>());
         let block_number = 0u64;
         let timestamp = chrono::Utc::now();
 
-        // Maker trade
+        // Maker trade with unique tx_hash
+        let maker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.maker);
         let mut maker_trade = Trade::new(
-            tx_hash.clone(),
+            maker_tx_hash,
             block_number,
             timestamp,
             format!("{:?}", event.maker),
@@ -180,9 +181,10 @@ impl PolygonListener {
                 / event.maker_amount_filled.as_u128() as f64;
         }
 
-        // Taker trade
+        // Taker trade with unique tx_hash
+        let taker_tx_hash = format!("0x{}_{:?}", &base_id[..60].chars().take(60).collect::<String>(), event.taker);
         let mut taker_trade = Trade::new(
-            tx_hash.clone(),
+            taker_tx_hash,
             block_number,
             timestamp,
             format!("{:?}", event.taker),
