@@ -5,8 +5,10 @@ use tracing::{error, info};
 
 mod calculator;
 mod models;
+mod username_fetcher;
 
 use calculator::ReputationCalculator;
+use username_fetcher::UsernameFetcher;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -39,7 +41,8 @@ async fn main() -> Result<()> {
 
     info!("✅ Connected to PostgreSQL");
 
-    let calculator = ReputationCalculator::new(db_pool);
+    let calculator = ReputationCalculator::new(db_pool.clone());
+    let username_fetcher = UsernameFetcher::new(db_pool);
 
     info!("📊 Calculating reputation scores every {} seconds", calculation_interval);
     info!("🔄 Starting calculation loop...");
@@ -57,6 +60,19 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 error!("❌ Iteration #{} failed: {}", iteration, e);
+            }
+        }
+
+        // Fetch usernames for wallets missing them (50 per iteration)
+        match username_fetcher.fetch_missing_usernames(50).await {
+            Ok(count) if count > 0 => {
+                info!("✅ Fetched {} usernames", count);
+            }
+            Ok(_) => {
+                // No wallets missing usernames, skip logging
+            }
+            Err(e) => {
+                error!("❌ Username fetching failed: {}", e);
             }
         }
 
