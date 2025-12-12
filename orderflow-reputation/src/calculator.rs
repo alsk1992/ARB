@@ -78,18 +78,24 @@ impl ReputationCalculator {
 
         let reputation = ReputationScore::new(score, confidence);
 
+        // Get raw win rate for storage (not normalized)
+        let raw_win_rate = self.get_raw_win_rate(wallet).await?;
+        let raw_profit_pct = self.get_raw_profit_pct(wallet).await?;
+
         // Save to database
-        self.save_reputation(wallet, &reputation).await?;
+        self.save_reputation(wallet, &reputation, raw_win_rate, raw_profit_pct).await?;
 
         // Save to history
         self.save_reputation_history(wallet, &reputation, trade_count).await?;
 
         debug!(
-            "Wallet {}: Score={:.2}, Tier={}, Confidence={:.2}",
+            "Wallet {}: Score={:.2}, Tier={}, Confidence={:.2}, WinRate={:.1}%, AvgProfit={:.1}%",
             wallet,
             reputation.score,
             reputation.tier.as_str(),
-            reputation.confidence
+            reputation.confidence,
+            raw_win_rate * 100.0,
+            raw_profit_pct * 100.0
         );
 
         Ok(reputation)
@@ -162,9 +168,16 @@ impl ReputationCalculator {
 
         let profit_factor = avg_profit_pct.unwrap_or(0.0);
 
-        // Normalize to 0-1 range (assume good traders make 10-50% per round trip)
-        // 0% = 0.5, +50% = 1.0, -50% = 0.0
-        let normalized = (profit_factor + 0.5) / 1.0;
+        // Use logarithmic scale to handle wide profit ranges
+        // -100% = 0.0, 0% = 0.5, 100% = 0.75, 500% = 0.9, 1000%+ = 1.0
+        let normalized = if profit_factor < 0.0 {
+            // Losses: -100% -> 0.0, 0% -> 0.5
+            (profit_factor + 1.0).max(0.0) * 0.5
+        } else {
+            // Profits: use log scale for 0% -> 1000%+
+            // 0% = 0.5, 50% = 0.65, 100% = 0.75, 500% = 0.9, 1000%+ = 1.0
+            0.5 + (0.5 * ((profit_factor + 1.0).ln() / 10.0_f64.ln()).min(1.0))
+        };
         Ok(normalized.max(0.0).min(1.0))
     }
 
@@ -274,7 +287,64 @@ impl ReputationCalculator {
         confidence.min(1.0)
     }
 
-    async fn save_reputation(&self, wallet: &str, reputation: &ReputationScore) -> Result<()> {
+    async fn get_raw_win_rate(&self, wallet: &str) -> Result<f64> {
+        let row = sqlx::query(
+            r#"
+            WITH position_pairs AS (
+                SELECT
+                    (t2.price - t1.price) * t1.size as realized_pnl
+                FROM orderflow_trades t1
+                JOIN orderflow_trades t2
+                    ON t1.wallet_address = t2.wallet_address
+                    AND t1.market_id = t2.market_id
+                    AND t1.token_id = t2.token_id
+                WHERE t1.wallet_address = $1
+                    AND t1.side = 'BUY'
+                    AND t2.side = 'SELL'
+                    AND t2.timestamp > t1.timestamp
+            )
+            SELECT
+                COUNT(CASE WHEN realized_pnl > 0 THEN 1 END)::float / NULLIF(COUNT(*), 0) as win_rate
+            FROM position_pairs
+            "#
+        )
+        .bind(wallet)
+        .fetch_one(&self.db)
+        .await?;
+
+        let win_rate: Option<f64> = row.try_get("win_rate").ok();
+        Ok(win_rate.unwrap_or(0.0))
+    }
+
+    async fn get_raw_profit_pct(&self, wallet: &str) -> Result<f64> {
+        let row = sqlx::query(
+            r#"
+            WITH position_pairs AS (
+                SELECT
+                    ((t2.price - t1.price) / t1.price) as profit_pct
+                FROM orderflow_trades t1
+                JOIN orderflow_trades t2
+                    ON t1.wallet_address = t2.wallet_address
+                    AND t1.market_id = t2.market_id
+                    AND t1.token_id = t2.token_id
+                WHERE t1.wallet_address = $1
+                    AND t1.side = 'BUY'
+                    AND t2.side = 'SELL'
+                    AND t2.timestamp > t1.timestamp
+            )
+            SELECT AVG(profit_pct) as avg_profit_pct
+            FROM position_pairs
+            "#
+        )
+        .bind(wallet)
+        .fetch_one(&self.db)
+        .await?;
+
+        let avg_profit_pct: Option<f64> = row.try_get("avg_profit_pct").ok();
+        Ok(avg_profit_pct.unwrap_or(0.0))
+    }
+
+    async fn save_reputation(&self, wallet: &str, reputation: &ReputationScore, win_rate: f64, avg_profit_pct: f64) -> Result<()> {
         sqlx::query(
             r#"
             INSERT INTO orderflow_wallet_stats (
@@ -282,15 +352,19 @@ impl ReputationCalculator {
                 reputation_score,
                 confidence_level,
                 trader_tier,
+                win_rate,
+                avg_profit_per_trade_pct,
                 last_calculated_at,
                 calculation_version
             )
-            VALUES ($1, $2, $3, $4, NOW(), 1)
+            VALUES ($1, $2, $3, $4, $5, $6, NOW(), 1)
             ON CONFLICT (wallet_address)
             DO UPDATE SET
                 reputation_score = $2,
                 confidence_level = $3,
                 trader_tier = $4,
+                win_rate = $5,
+                avg_profit_per_trade_pct = $6,
                 last_calculated_at = NOW(),
                 updated_at = NOW()
             "#
@@ -299,6 +373,8 @@ impl ReputationCalculator {
         .bind(reputation.score)
         .bind(reputation.confidence)
         .bind(reputation.tier.as_str())
+        .bind(win_rate)
+        .bind(avg_profit_pct)
         .execute(&self.db)
         .await?;
 
