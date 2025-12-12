@@ -193,8 +193,9 @@ impl MarketMonitor {
 
     /// Check if it's too late to enter a market (less than 2 minutes remaining)
     /// Avoid entering too close to settlement to prevent execution risk
-    pub fn is_too_late(market: &BtcMarket) -> bool {
-        Self::time_until_resolution(market) < chrono::Duration::minutes(2)
+    /// DISABLED FOR DATA COLLECTION - we want to test the whole period
+    pub fn is_too_late(_market: &BtcMarket) -> bool {
+        false  // Always allow entry for testing
     }
 
     /// Wait for next market window
