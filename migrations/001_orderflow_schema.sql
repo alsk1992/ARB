@@ -33,13 +33,13 @@ CREATE TABLE IF NOT EXISTS orderflow_trades (
     fee_paid NUMERIC(20, 18),
     gas_price NUMERIC(20, 0),
 
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-
-    INDEX idx_wallet (wallet_address),
-    INDEX idx_market (market_id),
-    INDEX idx_timestamp (timestamp DESC),
-    INDEX idx_tx_hash (tx_hash)
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_wallet ON orderflow_trades(wallet_address);
+CREATE INDEX IF NOT EXISTS idx_market ON orderflow_trades(market_id);
+CREATE INDEX IF NOT EXISTS idx_timestamp ON orderflow_trades(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_tx_hash ON orderflow_trades(tx_hash);
 
 -- ===========================================
 -- WALLET STATS - Aggregated performance metrics
@@ -110,11 +110,11 @@ CREATE TABLE IF NOT EXISTS orderflow_market_outcomes (
     total_volume_usd NUMERIC(20, 2),
     unique_traders INTEGER,
 
-    created_at TIMESTAMPTZ DEFAULT NOW(),
-
-    INDEX idx_resolved (resolved_at),
-    INDEX idx_category (category)
+    created_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_resolved ON orderflow_market_outcomes(resolved_at);
+CREATE INDEX IF NOT EXISTS idx_category ON orderflow_market_outcomes(category);
 
 -- ===========================================
 -- SIGNALS - Generated trading signals
@@ -155,12 +155,12 @@ CREATE TABLE IF NOT EXISTS orderflow_signals (
 
     -- Meta
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    expires_at TIMESTAMPTZ,
-
-    INDEX idx_status (status),
-    INDEX idx_created (created_at DESC),
-    INDEX idx_market (market_id)
+    expires_at TIMESTAMPTZ
 );
+
+CREATE INDEX IF NOT EXISTS idx_status ON orderflow_signals(status);
+CREATE INDEX IF NOT EXISTS idx_created ON orderflow_signals(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_market_signals ON orderflow_signals(market_id);
 
 -- ===========================================
 -- REPUTATION HISTORY - Track score changes over time
@@ -175,10 +175,10 @@ CREATE TABLE IF NOT EXISTS orderflow_reputation_history (
     total_trades INTEGER,
     total_pnl_usd NUMERIC(20, 2),
 
-    calculated_at TIMESTAMPTZ DEFAULT NOW(),
-
-    INDEX idx_wallet_time (wallet_address, calculated_at DESC)
+    calculated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE INDEX IF NOT EXISTS idx_wallet_time ON orderflow_reputation_history(wallet_address, calculated_at DESC);
 
 -- ===========================================
 -- LIVE POSITIONS - Currently open positions
@@ -202,11 +202,11 @@ CREATE TABLE IF NOT EXISTS orderflow_positions (
     status VARCHAR(20) DEFAULT 'OPEN', -- OPEN / CLOSED
 
     opened_at TIMESTAMPTZ DEFAULT NOW(),
-    closed_at TIMESTAMPTZ,
-
-    INDEX idx_status (status),
-    INDEX idx_market (market_id)
+    closed_at TIMESTAMPTZ
 );
+
+CREATE INDEX IF NOT EXISTS idx_status_positions ON orderflow_positions(status);
+CREATE INDEX IF NOT EXISTS idx_market_positions ON orderflow_positions(market_id);
 
 -- ===========================================
 -- PERFORMANCE METRICS - System-wide stats
